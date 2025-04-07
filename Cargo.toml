@@ -1,0 +1,10 @@
+[package]
+name = "audios-to-dataset"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+clap = { version = "4.5.35", features = ["derive"] }
+duckdb = { version = "1.2.1", features = ["bundled"] }
+recv-dir = "0.3.1"
+tree_magic_mini = { version = "3.1.6", features = ["with-gpl-data"] }
