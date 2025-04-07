@@ -2,3 +2,5 @@
 
 test-data/
 databases/
+
+.DS_Store

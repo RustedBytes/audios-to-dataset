@@ -1,0 +1,46 @@
+name: win-x86_64
+
+on:
+  # push:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows x86_64
+            os: windows-2022
+
+    steps:
+    - name: Toolchain versions
+      run: |
+        rustc --version
+        cargo --version
+
+    - name: Add x86_64-pc-windows-msvc target
+      run: rustup target add x86_64-pc-windows-msvc
+
+    - name: Cache
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          target
+        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+    - name: Build
+      run: cargo build --release --target x86_64-pc-windows-msvc
+
+    - name: Upload artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: audios-to-dataset.exe
+        path: target/x86_64-pc-windows-msvc/audios-to-dataset.exe
