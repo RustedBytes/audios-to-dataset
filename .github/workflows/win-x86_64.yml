@@ -19,6 +19,9 @@ jobs:
             os: windows-2022
 
     steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
     - name: Toolchain versions
       run: |
         rustc --version
