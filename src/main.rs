@@ -148,73 +148,78 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Found {} files", files.len());
 
     // Chunk the files into groups of 2000
-    for (idx, chunk) in files.chunks(args.files_per_db).enumerate() {
-        // Create the database file
-        let ext = match args.format {
-            Format::DUCKDB => "duckdb",
-            Format::PARQUET => "parquet",
-        };
-        let path = args.output.join(format!("{}.{}", idx, ext));
-
-        println!(
-            "Creating database {} and adding {} files to it",
-            path.display(),
-            args.files_per_db
-        );
-
-        // Remove if the file already exists
-        if std::path::Path::new(&path).exists() {
-            std::fs::remove_file(&path)?;
-        }
-
-        let mut files = Vec::new();
-        for (file_id, file_name) in chunk.iter().enumerate() {
-            // Read the file into a vector of bytes
-            let mut file = std::fs::File::open(file_name.clone())?;
-            let mut buffer = Vec::new();
-            file.read_to_end(&mut buffer)?;
-
-            // Extract the file name from the path
-            let file_name = file_name.file_name().unwrap().to_string_lossy().to_string();
-
-            let file = File {
-                id: file_id as i32,
-                duration: 0,
-                audio: Audio {
-                    path: file_name.clone(),
-                    bytes: buffer,
-                },
+    files
+        .chunks(args.files_per_db)
+        .enumerate()
+        .par_bridge() // Convert to a parallel iterator
+        .for_each(|(idx, chunk)| {
+            // Create the database file
+            let ext = match args.format {
+                Format::DUCKDB => "duckdb",
+                Format::PARQUET => "parquet",
             };
+            let path = args.output.join(format!("{}.{}", idx, ext));
 
-            // Add the file to the list
-            files.push(file);
-        }
+            println!(
+                "Creating database {} and adding {} files to it",
+                path.display(),
+                args.files_per_db
+            );
 
-        if args.format == Format::DUCKDB {
-            let conn = Connection::open(&path)?;
-            conn.execute_batch(CREATE_TABLE)?;
-
-            let mut insert_stmt =
-                conn.prepare("INSERT INTO files (id, duration, audio) VALUES (?, ?, row(?, ?))")?;
-
-            conn.execute_batch("BEGIN TRANSACTION")?;
-            for file in files {
-                insert_stmt.execute(params![
-                    file.id,
-                    file.duration,
-                    file.audio.path.clone(),
-                    file.audio.bytes.clone(),
-                ])?;
+            // Remove if the file already exists
+            if std::path::Path::new(&path).exists() {
+                std::fs::remove_file(&path).unwrap();
             }
-            conn.execute_batch("COMMIT TRANSACTION")?;
 
-            if let Err(e) = conn.close() {
-                eprintln!("Failed to close connection: {:?}", e);
+            let mut files = Vec::new();
+            for (file_id, file_name) in chunk.iter().enumerate() {
+                // Read the file into a vector of bytes
+                let mut file = std::fs::File::open(file_name.clone()).unwrap();
+                let mut buffer = Vec::new();
+                file.read_to_end(&mut buffer).unwrap();
+
+                // Extract the file name from the path
+                let file_name = file_name.file_name().unwrap().to_string_lossy().to_string();
+
+                let file = File {
+                    id: file_id as i32,
+                    duration: 0,
+                    audio: Audio {
+                        path: file_name.clone(),
+                        bytes: buffer,
+                    },
+                };
+
+                // Add the file to the list
+                files.push(file);
             }
-        } else if args.format == Format::PARQUET {
-            write_files_to_parquet(path.clone(), &files)?;
-        }
-    }
+
+            if args.format == Format::DUCKDB {
+                let conn = Connection::open(&path).unwrap();
+                conn.execute_batch(CREATE_TABLE).unwrap();
+
+                let mut insert_stmt = conn
+                    .prepare("INSERT INTO files (id, duration, audio) VALUES (?, ?, row(?, ?))")
+                    .unwrap();
+
+                conn.execute_batch("BEGIN TRANSACTION").unwrap();
+                for file in files {
+                    let _ = insert_stmt.execute(params![
+                        file.id,
+                        file.duration,
+                        file.audio.path.clone(),
+                        file.audio.bytes.clone(),
+                    ]);
+                }
+                conn.execute_batch("COMMIT TRANSACTION").unwrap();
+
+                if let Err(e) = conn.close() {
+                    eprintln!("Failed to close connection: {:?}", e);
+                }
+            } else if args.format == Format::PARQUET {
+                let _ = write_files_to_parquet(path.clone(), &files);
+            }
+        });
 
     Ok(())
 }
@@ -281,7 +286,7 @@ fn write_files_to_parquet<P: AsRef<Path>>(output_path: P, files: &[File]) -> Res
 
     let mut writer = ArrowWriter::try_new(file, schema, Some(props))?;
 
-    writer.write(&batch)?;
+    let _ = writer.write(&batch);
     writer.close()?;
 
     println!("Successfully wrote {} records to Parquet.", files.len());
