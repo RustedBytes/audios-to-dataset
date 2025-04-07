@@ -1,0 +1,30 @@
+version: 2
+
+project_name: audios-to-dataset
+
+before:
+  hooks:
+    - rustup default stable
+    - cargo fetch --locked
+
+env:
+  - CROSS_CONTAINER_ENGINE=podman
+  - CROSS_CONTAINER_OPTS=--platform=linux/amd64
+
+builds:
+  - builder: rust
+    id: audios-to-dataset
+    command: build
+    tool: cross
+    targets:
+      - x86_64-unknown-linux-gnu
+      - x86_64-unknown-linux-musl
+      - x86_64-apple-darwin
+      - aarch64-apple-darwin
+      - aarch64-unknown-linux-gnu
+
+universal_binaries:
+  - replace: false
+
+source:
+  enabled: false
