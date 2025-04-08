@@ -18,6 +18,10 @@ Options:
           How many files to put in each database [default: 500]
       --max-depth-size <MAX_DEPTH_SIZE>
           The maximum depth of the directory tree to scan [default: 50]
+      --check-mime-type
+          Check mime type of files
+      --num-threads <NUM_THREADS>
+          The number of threads used for processing [default: 5]
       --output <OUTPUT>
           The path to the output files
   -h, --help
