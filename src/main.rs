@@ -60,6 +60,10 @@ struct Args {
     #[arg(long, default_value_t = false)]
     check_mime_type: bool,
 
+    /// The number of threads used for processing
+    #[arg(long, default_value_t = 5)]
+    num_threads: usize,
+
     /// The path to the output files
     #[arg(long)]
     output: PathBuf,
@@ -91,6 +95,11 @@ const AUDIO_MIME_TYPES: [&str; 12] = [
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
+
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(args.num_threads)
+        .build_global()
+        .unwrap();
 
     if !args.input.exists() {
         eprintln!("Input folder does not exist: {:?}", args.input);
