@@ -2,5 +2,7 @@
 
 test-data/
 databases/
+dist/
+
 
 .DS_Store

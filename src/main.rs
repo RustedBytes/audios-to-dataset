@@ -8,14 +8,13 @@ use anyhow::Result;
 use arrow::array::{BinaryBuilder, Int32Builder, StringBuilder, StructBuilder};
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use arrow::record_batch::RecordBatch;
-use parquet::arrow::arrow_writer::ArrowWriter;
-use parquet::file::properties::WriterProperties;
-use serde::{Deserialize, Serialize};
-
 use clap::{Parser, ValueEnum};
 use duckdb::{Connection, params};
+use parquet::arrow::arrow_writer::ArrowWriter;
+use parquet::file::properties::WriterProperties;
 use rayon::prelude::*;
 use recv_dir::{Filter, MaxDepth, NoSymlink, RecursiveDirIterator};
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct Audio {
@@ -40,11 +39,11 @@ enum Format {
 #[derive(Parser, Debug)]
 #[command(version, long_about = None)]
 struct Args {
-    /// The path to the input folder
+    /// The path to the input folder (by default, the program will scan the entire folder recursively)
     #[arg(long)]
     input: PathBuf,
 
-    /// File format
+    /// The format of the output database files
     #[arg(long)]
     #[clap(value_enum, default_value_t = Format::PARQUET)]
     format: Format,
@@ -87,30 +86,24 @@ const AUDIO_MIME_TYPES: [&str; 12] = [
 ];
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Parse the command line arguments
     let args = Args::parse();
 
-    // Check if the input folder exists
     if !args.input.exists() {
         eprintln!("Input folder does not exist: {:?}", args.input);
         return Ok(());
     }
-
-    // Check if the input folder is a directory
     if !args.input.is_dir() {
         eprintln!("Input path is not a directory: {:?}", args.input);
         return Ok(());
     }
 
-    // Check if the output folder exists
     if !args.output.exists() {
-        // Create the output folder if it doesn't exist
         std::fs::create_dir_all(&args.output)?;
 
         println!("Created output folder: {:?}", args.output);
     }
 
-    // Scan the input folder for audio files
+    // Scan the input folder for files
     let dir = RecursiveDirIterator::with_filter(
         &args.input,
         NoSymlink.and(MaxDepth::new(
@@ -122,20 +115,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut files = Vec::new();
 
     for entry in dir {
-        // Skip folders
         if entry.is_dir() {
             println!("Skipping directory: {:?}", entry);
             continue;
         }
 
-        // Determine the mime type to check if the file is an audio file
         let mime_type = tree_magic_mini::from_filepath(&entry);
         if mime_type.is_none() {
             println!("No mime type found for {:?}", entry);
             continue;
         }
 
-        // Check if the mime type is in the list of audio mime types
         let mime_type = mime_type.unwrap();
         if !AUDIO_MIME_TYPES.contains(&mime_type) {
             println!("Not an audio file: {:?}: {}", entry, mime_type);
@@ -147,13 +137,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("Found {} files", files.len());
 
-    // Chunk the files into groups of 2000
+    // Chunk the files into groups of `args.files_per_db`
     files
         .chunks(args.files_per_db)
         .enumerate()
         .par_bridge() // Convert to a parallel iterator
         .for_each(|(idx, chunk)| {
-            // Create the database file
             let ext = match args.format {
                 Format::DUCKDB => "duckdb",
                 Format::PARQUET => "parquet",
@@ -166,19 +155,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 args.files_per_db
             );
 
-            // Remove if the file already exists
-            if std::path::Path::new(&path).exists() {
+            if path.exists() {
+                println!("Removing existing file: {:?}", path);
                 std::fs::remove_file(&path).unwrap();
             }
 
             let mut files = Vec::new();
             for (file_id, file_name) in chunk.iter().enumerate() {
-                // Read the file into a vector of bytes
                 let mut file = std::fs::File::open(file_name.clone()).unwrap();
                 let mut buffer = Vec::new();
                 file.read_to_end(&mut buffer).unwrap();
 
-                // Extract the file name from the path
                 let file_name = file_name.file_name().unwrap().to_string_lossy().to_string();
 
                 let file = File {
@@ -190,7 +177,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     },
                 };
 
-                // Add the file to the list
                 files.push(file);
             }
 
