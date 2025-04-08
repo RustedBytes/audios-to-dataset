@@ -40,7 +40,7 @@ jobs:
     
     - name: Grant access
       run: |
-        icacls test-data /grant "Users:Read"
+        icacls test-data /grant "Users:F"
 
     - name: Unpack parquet data
       run: |
