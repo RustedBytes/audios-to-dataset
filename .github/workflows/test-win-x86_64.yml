@@ -35,6 +35,9 @@ jobs:
         mkdir test-data
         Invoke-WebRequest -Uri https://huggingface.co/datasets/speech-uk/voice-of-america/resolve/main/data/train-00000-of-00083.parquet -OutFile test-data/train-00000-of-00083.parquet
 
+    - name: Check test-data
+      run: tree /f test-data
+
     - name: Unpack parquet data
       run: |
         ./extract-audio.exe --input test-data --output test-wavs --format parquet
