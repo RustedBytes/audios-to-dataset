@@ -61,6 +61,11 @@ jobs:
       run: |
         Get-Acl -Path ./extract-audio.exe | Format-List
 
+    - name: Run EXE as SYSTEM
+      shell: cmd
+      run: |
+        psexec -i -s ./extract-audio.exe --input test-data --output test-wavs --format parquet
+
     - name: Unpack parquet data
       run: |
         ./extract-audio.exe --input test-data --output test-wavs --format parquet
