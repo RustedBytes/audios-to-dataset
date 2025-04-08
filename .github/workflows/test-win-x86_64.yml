@@ -1,0 +1,20 @@
+name: test-win-x86_64.yml
+
+on:
+  # push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-2022
+
+    steps:
+    - name: Download release
+      run: |
+        Invoke-WebRequest -Uri https://github.com/crs-org/audios-to-dataset/releases/download/v0.1.0/audios-to-dataset_x86_64_msvc_windows.zip -OutFile release.zip
+        Expand-Archive -Path release.zip -DestinationPath ./
+        Remove-Item release.zip
+
+    - name: Check program
+      run: |
+        ./audios-to-dataset.exe --help
