@@ -56,6 +56,10 @@ jobs:
             Write-Host "Signing certificate is valid. No action needed."
         }
 
+    - name: See permissions
+      run: |
+        Get-Acl -Path ./extract-audio.exe | Format-List
+
     - name: Unpack parquet data
       run: |
         ./extract-audio.exe --input test-data --output test-wavs --format parquet
