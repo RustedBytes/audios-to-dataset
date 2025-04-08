@@ -43,6 +43,7 @@ jobs:
         mkdir test-wavs
         icacls test-data /grant "Users:F"
         icacls test-wavs /grant "Users:F"
+        icacls extract-audio.exe /grant "Users:F"
 
     - name: Trust extract-audio.exe executable
       run: |
