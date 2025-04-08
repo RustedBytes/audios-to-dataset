@@ -12,9 +12,9 @@ jobs:
 
     - name: Download audios-to-dataset
       run: |
-        Invoke-WebRequest -Uri https://github.com/crs-org/audios-to-dataset/releases/download/v0.1.0/audios-to-dataset_x86_64_msvc_windows.zip -OutFile release.zip
-        Expand-Archive -Path release.zip -DestinationPath ./
-        Remove-Item release.zip
+        Invoke-WebRequest -Uri https://github.com/crs-org/audios-to-dataset/releases/download/v0.1.0/audios-to-dataset_x86_64_msvc_windows.zip -OutFile audios-to-dataset.zip
+        Expand-Archive -Path audios-to-dataset.zip -DestinationPath ./
+        Remove-Item audios-to-dataset.zip
 
     - name: Check audios-to-dataset
       run: |
@@ -37,8 +37,7 @@ jobs:
 
     - name: Unpack parquet data
       run: |
-        ./extract-audio.exe --input test-data/ --output test-wavs/ --format wav
+        ./extract-audio.exe --input test-data/ --output test-wavs/ --format parquet
 
     - name: Check unpacked data
       run: tree /f test-wavs/
-  
