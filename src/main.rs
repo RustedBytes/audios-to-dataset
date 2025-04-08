@@ -56,6 +56,10 @@ struct Args {
     #[arg(long, default_value_t = 50)]
     max_depth_size: usize,
 
+    /// Check mime type of files
+    #[arg(long, default_value_t = false)]
+    check_mime_type: bool,
+
     /// The path to the output files
     #[arg(long)]
     output: PathBuf,
@@ -120,16 +124,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             continue;
         }
 
-        let mime_type = tree_magic_mini::from_filepath(&entry);
-        if mime_type.is_none() {
-            println!("No mime type found for {:?}", entry);
-            continue;
-        }
+        if args.check_mime_type {
+            let mime_type = tree_magic_mini::from_filepath(&entry);
+            if mime_type.is_none() {
+                println!("No mime type found for {:?}", entry);
+                continue;
+            }
 
-        let mime_type = mime_type.unwrap();
-        if !AUDIO_MIME_TYPES.contains(&mime_type) {
-            println!("Not an audio file: {:?}: {}", entry, mime_type);
-            continue;
+            let mime_type = mime_type.unwrap();
+            if !AUDIO_MIME_TYPES.contains(&mime_type) {
+                println!("Not an audio file: {:?}: {}", entry, mime_type);
+                continue;
+            }
         }
 
         files.push(entry);
