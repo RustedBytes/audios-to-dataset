@@ -1,7 +1,6 @@
 name: win-x86_64
 
 on:
-  # push:
   workflow_dispatch:
 
 env:

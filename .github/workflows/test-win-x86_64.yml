@@ -1,7 +1,6 @@
 name: test-win-x86_64.yml
 
 on:
-  # push:
   workflow_dispatch:
 
 jobs:
@@ -37,30 +36,7 @@ jobs:
 
     - name: Check test-data
       run: tree /f test-data
-    
-    - name: Grant access
-      run: |
-        mkdir test-wavs
-        icacls test-data /grant "Users:F"
-        icacls test-wavs /grant "Users:F"
-        icacls extract-audio.exe /grant "Users:F"
-
-    - name: Trust extract-audio.exe executable
-      run: |
-        $path = (Get-Command ./extract-audio.exe).Source
-        $cert = Get-AuthenticodeSignature $path
-        if ($cert.Status -ne 'Valid') {
-            Write-Host "Signing certificate is not valid. Trusting the executable..."
-            Set-ExecutionPolicy Bypass -Scope Process -Force
-            Unblock-File -Path $path
-        } else {
-            Write-Host "Signing certificate is valid. No action needed."
-        }
-
-    - name: See permissions
-      run: |
-        Get-Acl -Path ./extract-audio.exe | Format-List
-
+ 
     - name: Unpack parquet data
       run: |
         ./extract-audio.exe --input test-data/train-00000-of-00083.parquet --output test-wavs --format parquet
@@ -72,7 +48,7 @@ jobs:
       run: |
         ./audios-to-dataset.exe --input test-wavs --output ds-parquet --format parquet
         tree /f ds-parquet/
-    
+
     - name: Test case 2 (audios to duckdb)
       run: |
         ./audios-to-dataset.exe --input test-wavs --output ds-duckdb --format duckdb
