@@ -37,10 +37,14 @@ jobs:
 
     - name: Check test-data
       run: tree /f test-data
+    
+    - name: Grant access
+      run: |
+        icacls test-data /grant "Users:Read"
 
     - name: Unpack parquet data
       run: |
-        ./extract-audio.exe --input test-data --output test-data --format parquet
+        ./extract-audio.exe --input test-data --output test-wavs --format parquet
 
     - name: Check unpacked data
       run: tree /f test-wavs
