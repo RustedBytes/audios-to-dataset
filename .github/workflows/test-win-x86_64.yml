@@ -40,7 +40,7 @@ jobs:
 
     - name: Unpack parquet data
       run: |
-        ./extract-audio.exe --input test-data-fail --output test-wavs --format parquet
+        ./extract-audio.exe --input test-data --output test-data --format parquet
 
     - name: Check unpacked data
       run: tree /f test-wavs
