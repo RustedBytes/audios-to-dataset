@@ -41,7 +41,7 @@ jobs:
 
     - name: Unpack parquet data
       run: |
-        ./extract-audio --input test-data --output test-wavs --format parquet
+        ./extract-audio --input test-data/train-00000-of-00083.parquet --output test-wavs --format parquet
 
     - name: Check unpacked data
       run: ls -lh test-wavs
