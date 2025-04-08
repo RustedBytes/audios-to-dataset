@@ -40,7 +40,9 @@ jobs:
     
     - name: Grant access
       run: |
+        mkdir test-wavs
         icacls test-data /grant "Users:F"
+        icacls test-wavs /grant "Users:F"
 
     - name: Unpack parquet data
       run: |
