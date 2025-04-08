@@ -37,17 +37,17 @@ jobs:
 
     - name: Unpack parquet data
       run: |
-        ./extract-audio.exe --input test-data/ --output test-wavs/ --format parquet
+        ./extract-audio.exe --input test-data --output test-wavs --format parquet
 
     - name: Check unpacked data
-      run: tree /f test-wavs/
+      run: tree /f test-wavs
 
     - name: Test case 1 (audios to parquet)
       run: |
-        ./audios-to-dataset.exe --input test-wavs/ --output ds-parquet/ --format parquet
+        ./audios-to-dataset.exe --input test-wavs --output ds-parquet --format parquet
         tree /f ds-parquet/
     
     - name: Test case 2 (audios to duckdb)
       run: |
-        ./audios-to-dataset.exe --input test-wavs/ --output ds-duckdb/ --format duckdb
+        ./audios-to-dataset.exe --input test-wavs --output ds-duckdb --format duckdb
         tree /f ds-duckdb/
