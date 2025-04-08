@@ -11,7 +11,7 @@ jobs:
 
     - name: Download audios-to-dataset
       run: |
-        wget -o "audios-to-dataset.zip" https://github.com/crs-org/audios-to-dataset/releases/download/v0.1.0/audios-to-dataset_x86_64-unknown-linux-gnu.zip
+        wget -O "audios-to-dataset.zip" https://github.com/crs-org/audios-to-dataset/releases/download/v0.1.0/audios-to-dataset_x86_64-unknown-linux-gnu.zip
         unzip audios-to-dataset.zip
         rm audios-to-dataset.zip
         mv audios-to-dataset_x86_64-unknown-linux-gnu/audios-to-dataset .
@@ -22,7 +22,7 @@ jobs:
 
     - name: Download extract-audio
       run: |
-        wget -o "extract-audio.zip" https://github.com/crs-org/extract-audio/releases/download/v0.2.0/extract-audio_x86_64-unknown-linux-gnu.zip
+        wget -O "extract-audio.zip" https://github.com/crs-org/extract-audio/releases/download/v0.2.0/extract-audio_x86_64-unknown-linux-gnu.zip
         unzip extract-audio.zip
         rm extract-audio.zip
         mv extract-audio_x86_64-unknown-linux-gnu/extract-audio .
@@ -34,7 +34,7 @@ jobs:
     - name: Download parquet data
       run: |
         mkdir test-data
-        wget -o "test-data/train-00000-of-00083.parquet" https://huggingface.co/datasets/speech-uk/voice-of-america/resolve/main/data/train-00000-of-00083.parquet
+        wget -O "test-data/train-00000-of-00083.parquet" https://huggingface.co/datasets/speech-uk/voice-of-america/resolve/main/data/train-00000-of-00083.parquet
 
     - name: Check test-data
       run: ls -lh test-data
