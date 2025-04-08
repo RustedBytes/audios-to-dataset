@@ -1,5 +1,6 @@
 # `audios-to-dataset`
 
+[![build](https://github.com/crs-org/audios-to-dataset/actions/workflows/build.yml/badge.svg)](https://github.com/crs-org/audios-to-dataset/actions/workflows/build.yml)
 [![win-x86_64](https://github.com/crs-org/audios-to-dataset/actions/workflows/win-x86_64.yml/badge.svg)](https://github.com/crs-org/audios-to-dataset/actions/workflows/win-x86_64.yml)
 
 Convert your audio files into DuckDB or Parquet files (the same thing as does Hugging Face `datasets` library).
