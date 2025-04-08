@@ -46,7 +46,7 @@ jobs:
 
     - name: Trust extract-audio.exe executable
       run: |
-        $path = (Get-Command extract-audio.exe).Source
+        $path = (Get-Command ./extract-audio.exe).Source
         $cert = Get-AuthenticodeSignature $path
         if ($cert.Status -ne 'Valid') {
             Write-Host "Signing certificate is not valid. Trusting the executable..."
