@@ -32,8 +32,8 @@ struct File {
 
 #[derive(Clone, Debug, Copy, PartialEq, Eq, ValueEnum)]
 enum Format {
-    DUCKDB,
-    PARQUET,
+    DuckDB,
+    Parquet,
 }
 
 #[derive(Parser, Debug)]
@@ -45,7 +45,7 @@ struct Args {
 
     /// The format of the output database files
     #[arg(long)]
-    #[clap(value_enum, default_value_t = Format::PARQUET)]
+    #[clap(value_enum, default_value_t = Format::Parquet)]
     format: Format,
 
     /// How many files to put in each database
@@ -159,8 +159,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .par_bridge() // Convert to a parallel iterator
         .for_each(|(idx, chunk)| {
             let ext = match args.format {
-                Format::DUCKDB => "duckdb",
-                Format::PARQUET => "parquet",
+                Format::DuckDB => "duckdb",
+                Format::Parquet => "parquet",
             };
             let path = args.output.join(format!("{}.{}", idx, ext));
 
@@ -195,7 +195,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 files.push(file);
             }
 
-            if args.format == Format::DUCKDB {
+            if args.format == Format::DuckDB {
                 let conn = Connection::open(&path).unwrap();
                 conn.execute_batch(CREATE_TABLE).unwrap();
 
@@ -217,7 +217,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if let Err(e) = conn.close() {
                     eprintln!("Failed to close connection: {:?}", e);
                 }
-            } else if args.format == Format::PARQUET {
+            } else if args.format == Format::Parquet {
                 let _ = write_files_to_parquet(path.clone(), &files);
             }
         });
