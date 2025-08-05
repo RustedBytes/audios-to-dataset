@@ -93,13 +93,82 @@ const AUDIO_MIME_TYPES: [&str; 12] = [
     "audio/aac",
 ];
 
+fn create_schema() -> SchemaRef {
+    let audio_fields = vec![
+        Field::new("path", DataType::Utf8, false),
+        Field::new("bytes", DataType::Binary, false),
+    ];
+
+    let audio_struct = DataType::Struct(audio_fields.into());
+
+    let schema = Schema::new(vec![
+        Field::new("id", DataType::Int32, false),
+        Field::new("duration", DataType::Int32, false),
+        Field::new("audio", audio_struct, false),
+    ]);
+
+    Arc::new(schema)
+}
+
+fn write_files_to_parquet<P: AsRef<Path>>(output_path: P, files: &[File]) -> Result<()> {
+    let schema = create_schema();
+
+    let mut id_builder = Int32Builder::with_capacity(files.len());
+    let mut duration_builder = Int32Builder::with_capacity(files.len());
+
+    let audio_path_builder = StringBuilder::with_capacity(files.len(), files.len() * 50); // Estimate capacity
+    let audio_bytes_builder = BinaryBuilder::with_capacity(files.len(), files.len() * 1024 * 10); // Estimate capacity
+
+    let audio_fields_for_builder = vec![
+        Field::new("path", DataType::Utf8, false),
+        Field::new("bytes", DataType::Binary, false),
+    ];
+    let audio_field_builders: Vec<Box<dyn arrow::array::ArrayBuilder>> =
+        vec![Box::new(audio_path_builder), Box::new(audio_bytes_builder)];
+    let mut audio_struct_builder =
+        StructBuilder::new(audio_fields_for_builder, audio_field_builders);
+
+    for file in files {
+        id_builder.append_value(file.id);
+        duration_builder.append_value(file.duration);
+
+        audio_struct_builder
+            .field_builder::<StringBuilder>(0)
+            .unwrap()
+            .append_value(&file.audio.path);
+        audio_struct_builder
+            .field_builder::<BinaryBuilder>(1)
+            .unwrap()
+            .append_value(&file.audio.bytes);
+
+        audio_struct_builder.append(true);
+    }
+
+    let id_array = Arc::new(id_builder.finish());
+    let duration_array = Arc::new(duration_builder.finish());
+    let audio_array = Arc::new(audio_struct_builder.finish());
+
+    let batch = RecordBatch::try_new(schema.clone(), vec![id_array, duration_array, audio_array])?;
+
+    let file = StdFile::create(output_path)?;
+    let props = WriterProperties::builder().build();
+
+    let mut writer = ArrowWriter::try_new(file, schema, Some(props))?;
+
+    let _ = writer.write(&batch);
+    writer.close()?;
+
+    println!("Successfully wrote {} records to Parquet.", files.len());
+
+    Ok(())
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
     rayon::ThreadPoolBuilder::new()
         .num_threads(args.num_threads)
-        .build_global()
-        .unwrap();
+        .build_global()?;
 
     if !args.input.exists() {
         eprintln!("Input folder does not exist: {:?}", args.input);
@@ -122,8 +191,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         NoSymlink.and(MaxDepth::new(
             NonZeroUsize::new(args.max_depth_size).unwrap(),
         )),
-    )
-    .unwrap();
+    )?;
 
     let mut files = Vec::new();
 
@@ -221,76 +289,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let _ = write_files_to_parquet(path.clone(), &files);
             }
         });
-
-    Ok(())
-}
-
-fn create_schema() -> SchemaRef {
-    let audio_fields = vec![
-        Field::new("path", DataType::Utf8, false),
-        Field::new("bytes", DataType::Binary, false),
-    ];
-
-    let audio_struct = DataType::Struct(audio_fields.into());
-
-    let schema = Schema::new(vec![
-        Field::new("id", DataType::Int32, false),
-        Field::new("duration", DataType::Int32, false),
-        Field::new("audio", audio_struct, false),
-    ]);
-
-    Arc::new(schema)
-}
-
-fn write_files_to_parquet<P: AsRef<Path>>(output_path: P, files: &[File]) -> Result<()> {
-    let schema = create_schema();
-
-    let mut id_builder = Int32Builder::with_capacity(files.len());
-    let mut duration_builder = Int32Builder::with_capacity(files.len());
-
-    let audio_path_builder = StringBuilder::with_capacity(files.len(), files.len() * 50); // Estimate capacity
-    let audio_bytes_builder = BinaryBuilder::with_capacity(files.len(), files.len() * 1024 * 10); // Estimate capacity
-
-    let audio_fields_for_builder = vec![
-        Field::new("path", DataType::Utf8, false),
-        Field::new("bytes", DataType::Binary, false),
-    ];
-    let audio_field_builders: Vec<Box<dyn arrow::array::ArrayBuilder>> =
-        vec![Box::new(audio_path_builder), Box::new(audio_bytes_builder)];
-    let mut audio_struct_builder =
-        StructBuilder::new(audio_fields_for_builder, audio_field_builders);
-
-    for file in files {
-        id_builder.append_value(file.id);
-        duration_builder.append_value(file.duration);
-
-        audio_struct_builder
-            .field_builder::<StringBuilder>(0)
-            .unwrap()
-            .append_value(&file.audio.path);
-        audio_struct_builder
-            .field_builder::<BinaryBuilder>(1)
-            .unwrap()
-            .append_value(&file.audio.bytes);
-
-        audio_struct_builder.append(true);
-    }
-
-    let id_array = Arc::new(id_builder.finish());
-    let duration_array = Arc::new(duration_builder.finish());
-    let audio_array = Arc::new(audio_struct_builder.finish());
-
-    let batch = RecordBatch::try_new(schema.clone(), vec![id_array, duration_array, audio_array])?;
-
-    let file = StdFile::create(output_path)?;
-    let props = WriterProperties::builder().build();
-
-    let mut writer = ArrowWriter::try_new(file, schema, Some(props))?;
-
-    let _ = writer.write(&batch);
-    writer.close()?;
-
-    println!("Successfully wrote {} records to Parquet.", files.len());
 
     Ok(())
 }
