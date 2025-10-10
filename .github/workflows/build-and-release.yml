@@ -20,11 +20,11 @@ jobs:
       - name: Upload release binary as artifact
         uses: actions/upload-artifact@v4
         with:
-          name: invoke-llm
-          path: target/release/invoke-llm
+          name: audios-to-dataset
+          path: target/release/audios-to-dataset
       - name: Create GitHub Release & Upload Asset
         uses: softprops/action-gh-release@v2
         with:
-          files: target/release/invoke-llm
+          files: target/release/audios-to-dataset
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
