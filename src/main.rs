@@ -3,11 +3,11 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::{io::Read, num::NonZeroUsize};
 
-use polars::prelude::*;
 use anyhow::Result;
 use clap::{Parser, ValueEnum};
 use duckdb::{Connection, params};
 use hound::WavReader;
+use polars::prelude::*;
 use rayon::prelude::*;
 use recv_dir::{Filter, MaxDepth, NoSymlink, RecursiveDirIterator};
 use serde::{Deserialize, Serialize};
@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct Audio {
     path: String,
-    // sampling_rate: i32,
+    sampling_rate: i32,
     bytes: Vec<u8>,
 }
 
@@ -89,7 +89,7 @@ CREATE TABLE files (
   id INTEGER PRIMARY KEY DEFAULT NEXTVAL('seq'),
   duration DOUBLE,
   transcription VARCHAR,
-  audio STRUCT(path VARCHAR, bytes BLOB)
+  audio STRUCT(path VARCHAR, sampling_rate INTEGER, bytes BLOB)
 );";
 
 const AUDIO_MIME_TYPES: [&str; 12] = [
@@ -124,17 +124,23 @@ fn write_files_to_parquet<P: AsRef<Path>>(
         .map(|file| Some(file.audio.bytes.clone()))
         .collect();
 
+    let sr_data: Vec<Option<i32>> = files
+        .iter()
+        .map(|file| Some(file.audio.sampling_rate.clone()))
+        .collect();
+
     let path_data: Vec<Option<String>> = files
         .iter()
         .map(|file| Some(file.audio.path.clone()))
         .collect();
 
     let bytes_series = Series::new("bytes".into(), bytes_data);
+    let sr_series = Series::new("sampling_rate".into(), sr_data);
     let path_series = Series::new("path".into(), path_data);
     let audio_struct_series: Series = StructChunked::from_series(
         "audio".into(),
         files.len(),
-        [bytes_series, path_series].iter(),
+        [bytes_series, sr_series, path_series].iter(),
     )?
     .into_series();
 
@@ -261,12 +267,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let mut buffer = Vec::new();
                 file.read_to_end(&mut buffer).unwrap();
 
-                let duration = match WavReader::new(&buffer[..]) {
+                let (duration, sr) = match WavReader::new(&buffer[..]) {
                     Ok(reader) => {
                         let spec = reader.spec();
-                        reader.duration() as f64 / spec.sample_rate as f64
+                        (reader.duration() as f64 / spec.sample_rate as f64, spec.sample_rate as i32)
                     }
-                    Err(_) => 0.0,
+                    Err(_) => (0.0, 0),
                 };
 
                 let file_name = match file_name.file_name().and_then(|s| s.to_str()) {
@@ -284,6 +290,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     duration,
                     audio: Audio {
                         path: file_name,
+                        sampling_rate: sr,
                         bytes: buffer,
                     },
                     transcription: "-".to_string(),
@@ -297,7 +304,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 conn.execute_batch(CREATE_TABLE).unwrap();
 
                 let mut insert_stmt = conn
-                    .prepare("INSERT INTO files (id, transcription, duration, audio) VALUES (?, ?, ?, row(?, ?))")
+                    .prepare("INSERT INTO files (id, transcription, duration, audio) VALUES (?, ?, ?, row(?, ?, ?))")
                     .unwrap();
 
                 conn.execute_batch("BEGIN TRANSACTION").unwrap();
@@ -307,6 +314,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         file.transcription,
                         file.duration,
                         file.audio.path.clone(),
+                        file.audio.sampling_rate.clone(),
                         file.audio.bytes.clone(),
                     ]);
                 }
