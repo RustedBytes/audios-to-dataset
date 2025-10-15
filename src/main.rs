@@ -1,22 +1,13 @@
 use std::fs::File as StdFile;
 use std::path::Path;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::{io::Read, num::NonZeroUsize};
 
+use polars::prelude::*;
 use anyhow::Result;
-use arrow::array::{BinaryBuilder, Float64Builder, StringBuilder, StructBuilder};
-use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
-use arrow::record_batch::RecordBatch;
 use clap::{Parser, ValueEnum};
 use duckdb::{Connection, params};
 use hound::WavReader;
-use parquet::arrow::arrow_writer::ArrowWriter;
-use parquet::basic::BrotliLevel;
-use parquet::basic::Compression;
-use parquet::basic::GzipLevel;
-use parquet::basic::ZstdLevel;
-use parquet::file::properties::WriterProperties;
 use rayon::prelude::*;
 use recv_dir::{Filter, MaxDepth, NoSymlink, RecursiveDirIterator};
 use serde::{Deserialize, Serialize};
@@ -42,7 +33,7 @@ enum Format {
 }
 
 #[derive(Clone, Debug, Copy, PartialEq, Eq, ValueEnum)]
-enum ParquetCompression {
+enum ParquetCompressionChoice {
     Uncompressed,
     Snappy,
     Gzip,
@@ -87,8 +78,8 @@ struct Args {
 
     /// The compression algorithm to use for Parquet files
     #[arg(long)]
-    #[clap(value_enum, default_value_t = ParquetCompression::Snappy)]
-    parquet_compression: ParquetCompression,
+    #[clap(value_enum, default_value_t = ParquetCompressionChoice::Snappy)]
+    parquet_compression: ParquetCompressionChoice,
 }
 
 const CREATE_TABLE: &str = r"
@@ -96,7 +87,8 @@ CREATE SEQUENCE seq;
 
 CREATE TABLE files (
   id INTEGER PRIMARY KEY DEFAULT NEXTVAL('seq'),
-  duration INTEGER,
+  duration DOUBLE,
+  transcription VARCHAR,
   audio STRUCT(path VARCHAR, bytes BLOB)
 );";
 
@@ -115,90 +107,68 @@ const AUDIO_MIME_TYPES: [&str; 12] = [
     "audio/aac",
 ];
 
-fn create_schema() -> SchemaRef {
-    let audio_fields = vec![
-        Field::new("bytes", DataType::Binary, false),
-        Field::new("path", DataType::Utf8, false),
-    ];
-
-    let audio_struct = DataType::Struct(audio_fields.into());
-
-    let schema = Schema::new(vec![
-        Field::new("audio", audio_struct, false),
-        Field::new("duration", DataType::Float64, false),
-        Field::new("transcription", DataType::Utf8, false),
-    ]);
-
-    Arc::new(schema)
-}
-
 fn write_files_to_parquet<P: AsRef<Path>>(
     output_path: P,
     files: &[File],
-    compression: ParquetCompression,
+    compression: ParquetCompressionChoice,
 ) -> Result<()> {
-    let schema = create_schema();
+    let transcription_data: Vec<Option<String>> = files
+        .iter()
+        .map(|file| Some(file.transcription.clone()))
+        .collect();
 
-    let mut duration_builder = Float64Builder::with_capacity(files.len());
-    let mut transcription_builder = StringBuilder::with_capacity(files.len(), files.len() * 50);
+    let duration_data: Vec<Option<f64>> = files.iter().map(|file| Some(file.duration)).collect();
 
-    let audio_path_builder = StringBuilder::with_capacity(files.len(), files.len() * 50); // Estimate capacity
-    let audio_bytes_builder = BinaryBuilder::with_capacity(files.len(), files.len() * 1024 * 10); // Estimate capacity
+    let bytes_data: Vec<Option<Vec<u8>>> = files
+        .iter()
+        .map(|file| Some(file.audio.bytes.clone()))
+        .collect();
 
-    let audio_fields_for_builder = vec![
-        Field::new("bytes", DataType::Binary, false),
-        Field::new("path", DataType::Utf8, false),
-    ];
-    let audio_field_builders: Vec<Box<dyn arrow::array::ArrayBuilder>> =
-        vec![Box::new(audio_bytes_builder), Box::new(audio_path_builder)];
-    let mut audio_struct_builder =
-        StructBuilder::new(audio_fields_for_builder, audio_field_builders);
+    let path_data: Vec<Option<String>> = files
+        .iter()
+        .map(|file| Some(file.audio.path.clone()))
+        .collect();
 
-    for file in files {
-        transcription_builder.append_value(file.transcription.clone());
+    let bytes_series = Series::new("bytes".into(), bytes_data);
+    let path_series = Series::new("path".into(), path_data);
+    let audio_struct_series: Series = StructChunked::from_series(
+        "audio".into(),
+        files.len(),
+        [bytes_series, path_series].iter(),
+    )?
+    .into_series();
 
-        duration_builder.append_value(file.duration);
+    let duration_series = Series::new("duration".into(), duration_data);
+    let transcription_series = Series::new("transcription".into(), transcription_data);
 
-        audio_struct_builder
-            .field_builder::<BinaryBuilder>(0)
-            .unwrap()
-            .append_value(&file.audio.bytes);
-        audio_struct_builder
-            .field_builder::<StringBuilder>(1)
-            .unwrap()
-            .append_value(&file.audio.path);
+    let mut df = DataFrame::new(vec![
+        audio_struct_series.into_column(),
+        duration_series.into_column(),
+        transcription_series.into_column(),
+    ])?;
 
-        audio_struct_builder.append(true);
-    }
-
-    let transcription_array = Arc::new(transcription_builder.finish());
-    let duration_array = Arc::new(duration_builder.finish());
-    let audio_array = Arc::new(audio_struct_builder.finish());
-
-    let batch = RecordBatch::try_new(
-        schema.clone(),
-        vec![audio_array, duration_array, transcription_array],
-    )?;
-
-    let file = StdFile::create(output_path)?;
-    let compression = match compression {
-        ParquetCompression::Uncompressed => Compression::UNCOMPRESSED,
-        ParquetCompression::Snappy => Compression::SNAPPY,
-        ParquetCompression::Gzip => Compression::GZIP(GzipLevel::default()),
-        ParquetCompression::Lzo => Compression::LZO,
-        ParquetCompression::Brotli => Compression::BROTLI(BrotliLevel::default()),
-        ParquetCompression::Lz4 => Compression::LZ4,
-        ParquetCompression::Zstd => Compression::ZSTD(ZstdLevel::default()),
-        ParquetCompression::Lz4Raw => Compression::LZ4_RAW,
+    let pq_compression = match compression {
+        ParquetCompressionChoice::Uncompressed => ParquetCompression::Uncompressed,
+        ParquetCompressionChoice::Snappy => ParquetCompression::Snappy,
+        ParquetCompressionChoice::Gzip => ParquetCompression::Gzip(None),
+        ParquetCompressionChoice::Lzo => ParquetCompression::Lzo,
+        ParquetCompressionChoice::Brotli => ParquetCompression::Brotli(None),
+        ParquetCompressionChoice::Lz4 => ParquetCompression::Lzo,
+        ParquetCompressionChoice::Zstd => ParquetCompression::Zstd(None),
+        ParquetCompressionChoice::Lz4Raw => ParquetCompression::Lz4Raw,
     };
-    let props = WriterProperties::builder()
-        .set_compression(compression)
-        .build();
 
-    let mut writer = ArrowWriter::try_new(file, schema, Some(props))?;
+    let hf_value = r#"{"info": {"features": {"audio": {"_type": "Audio"}, "duration": {"dtype": "float64", "_type": "Value"}, "transcription": {"dtype": "string", "_type": "Value"}}}}"#;
 
-    let _ = writer.write(&batch);
-    writer.close()?;
+    let custom_metadata =
+        KeyValueMetadata::from_static(vec![("huggingface".to_string(), hf_value.to_string())]);
+
+    let mut file = StdFile::create(output_path)?;
+    ParquetWriter::new(&mut file)
+        .with_key_value_metadata(Some(custom_metadata))
+        .with_compression(pq_compression)
+        .with_row_group_size(Some(256))
+        .finish(&mut df)?;
 
     println!("Successfully wrote {} records to Parquet.", files.len());
 
