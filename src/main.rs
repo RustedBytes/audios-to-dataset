@@ -29,6 +29,7 @@ struct File {
     id: i32,
     duration: i32,
     audio: Audio,
+    transcription: String,
 }
 
 #[derive(Clone, Debug, Copy, PartialEq, Eq, ValueEnum)]
@@ -261,6 +262,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         path: file_name.clone(),
                         bytes: buffer,
                     },
+                    transcription: "".to_string(),
                 };
 
                 files.push(file);
