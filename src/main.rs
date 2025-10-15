@@ -5,13 +5,17 @@ use std::sync::Arc;
 use std::{io::Read, num::NonZeroUsize};
 
 use anyhow::Result;
-use arrow::array::{BinaryBuilder, Int32Builder, StringBuilder, StructBuilder};
+use arrow::array::{BinaryBuilder, Float64Builder, StringBuilder, StructBuilder};
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use arrow::record_batch::RecordBatch;
 use clap::{Parser, ValueEnum};
 use duckdb::{Connection, params};
+use hound::WavReader;
 use parquet::arrow::arrow_writer::ArrowWriter;
+use parquet::basic::BrotliLevel;
 use parquet::basic::Compression;
+use parquet::basic::GzipLevel;
+use parquet::basic::ZstdLevel;
 use parquet::file::properties::WriterProperties;
 use rayon::prelude::*;
 use recv_dir::{Filter, MaxDepth, NoSymlink, RecursiveDirIterator};
@@ -26,8 +30,7 @@ struct Audio {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct File {
-    id: i32,
-    duration: i32,
+    duration: f64,
     audio: Audio,
     transcription: String,
 }
@@ -36,6 +39,18 @@ struct File {
 enum Format {
     DuckDB,
     Parquet,
+}
+
+#[derive(Clone, Debug, Copy, PartialEq, Eq, ValueEnum)]
+enum ParquetCompression {
+    Uncompressed,
+    Snappy,
+    Gzip,
+    Lzo,
+    Brotli,
+    Lz4,
+    Zstd,
+    Lz4Raw,
 }
 
 #[derive(Parser, Debug)]
@@ -69,6 +84,11 @@ struct Args {
     /// The path to the output files
     #[arg(long)]
     output: PathBuf,
+
+    /// The compression algorithm to use for Parquet files
+    #[arg(long)]
+    #[clap(value_enum, default_value_t = ParquetCompression::Snappy)]
+    parquet_compression: ParquetCompression,
 }
 
 const CREATE_TABLE: &str = r"
@@ -97,64 +117,82 @@ const AUDIO_MIME_TYPES: [&str; 12] = [
 
 fn create_schema() -> SchemaRef {
     let audio_fields = vec![
-        Field::new("path", DataType::Utf8, false),
         Field::new("bytes", DataType::Binary, false),
+        Field::new("path", DataType::Utf8, false),
     ];
 
     let audio_struct = DataType::Struct(audio_fields.into());
 
     let schema = Schema::new(vec![
-        Field::new("id", DataType::Int32, false),
-        Field::new("duration", DataType::Int32, false),
         Field::new("audio", audio_struct, false),
+        Field::new("duration", DataType::Float64, false),
+        Field::new("transcription", DataType::Utf8, false),
     ]);
 
     Arc::new(schema)
 }
 
-fn write_files_to_parquet<P: AsRef<Path>>(output_path: P, files: &[File]) -> Result<()> {
+fn write_files_to_parquet<P: AsRef<Path>>(
+    output_path: P,
+    files: &[File],
+    compression: ParquetCompression,
+) -> Result<()> {
     let schema = create_schema();
 
-    let mut id_builder = Int32Builder::with_capacity(files.len());
-    let mut duration_builder = Int32Builder::with_capacity(files.len());
+    let mut duration_builder = Float64Builder::with_capacity(files.len());
+    let mut transcription_builder = StringBuilder::with_capacity(files.len(), files.len() * 50);
 
     let audio_path_builder = StringBuilder::with_capacity(files.len(), files.len() * 50); // Estimate capacity
     let audio_bytes_builder = BinaryBuilder::with_capacity(files.len(), files.len() * 1024 * 10); // Estimate capacity
 
     let audio_fields_for_builder = vec![
-        Field::new("path", DataType::Utf8, false),
         Field::new("bytes", DataType::Binary, false),
+        Field::new("path", DataType::Utf8, false),
     ];
     let audio_field_builders: Vec<Box<dyn arrow::array::ArrayBuilder>> =
-        vec![Box::new(audio_path_builder), Box::new(audio_bytes_builder)];
+        vec![Box::new(audio_bytes_builder), Box::new(audio_path_builder)];
     let mut audio_struct_builder =
         StructBuilder::new(audio_fields_for_builder, audio_field_builders);
 
     for file in files {
-        id_builder.append_value(file.id);
+        transcription_builder.append_value(file.transcription.clone());
+
         duration_builder.append_value(file.duration);
 
         audio_struct_builder
-            .field_builder::<StringBuilder>(0)
-            .unwrap()
-            .append_value(&file.audio.path);
-        audio_struct_builder
-            .field_builder::<BinaryBuilder>(1)
+            .field_builder::<BinaryBuilder>(0)
             .unwrap()
             .append_value(&file.audio.bytes);
+        audio_struct_builder
+            .field_builder::<StringBuilder>(1)
+            .unwrap()
+            .append_value(&file.audio.path);
 
         audio_struct_builder.append(true);
     }
 
-    let id_array = Arc::new(id_builder.finish());
+    let transcription_array = Arc::new(transcription_builder.finish());
     let duration_array = Arc::new(duration_builder.finish());
     let audio_array = Arc::new(audio_struct_builder.finish());
 
-    let batch = RecordBatch::try_new(schema.clone(), vec![id_array, duration_array, audio_array])?;
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![audio_array, duration_array, transcription_array],
+    )?;
 
     let file = StdFile::create(output_path)?;
+    let compression = match compression {
+        ParquetCompression::Uncompressed => Compression::UNCOMPRESSED,
+        ParquetCompression::Snappy => Compression::SNAPPY,
+        ParquetCompression::Gzip => Compression::GZIP(GzipLevel::default()),
+        ParquetCompression::Lzo => Compression::LZO,
+        ParquetCompression::Brotli => Compression::BROTLI(BrotliLevel::default()),
+        ParquetCompression::Lz4 => Compression::LZ4,
+        ParquetCompression::Zstd => Compression::ZSTD(ZstdLevel::default()),
+        ParquetCompression::Lz4Raw => Compression::LZ4_RAW,
+    };
     let props = WriterProperties::builder()
-        .set_compression(Compression::SNAPPY)
+        .set_compression(compression)
         .build();
 
     let mut writer = ArrowWriter::try_new(file, schema, Some(props))?;
@@ -248,21 +286,37 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             let mut files = Vec::new();
-            for (file_id, file_name) in chunk.iter().enumerate() {
+            for file_name in chunk {
                 let mut file = std::fs::File::open(file_name.clone()).unwrap();
                 let mut buffer = Vec::new();
                 file.read_to_end(&mut buffer).unwrap();
 
-                let file_name = file_name.file_name().unwrap().to_string_lossy().to_string();
+                let duration = match WavReader::new(&buffer[..]) {
+                    Ok(reader) => {
+                        let spec = reader.spec();
+                        reader.duration() as f64 / spec.sample_rate as f64
+                    }
+                    Err(_) => 0.0,
+                };
+
+                let file_name = match file_name.file_name().and_then(|s| s.to_str()) {
+                    Some(name) => name.to_string(),
+                    None => {
+                        eprintln!(
+                            "Could not get file name as a string for {:?}, skipping.",
+                            file_name
+                        );
+                        continue;
+                    }
+                };
 
                 let file = File {
-                    id: file_id as i32,
-                    duration: 0,
+                    duration,
                     audio: Audio {
-                        path: file_name.clone(),
+                        path: file_name,
                         bytes: buffer,
                     },
-                    transcription: "".to_string(),
+                    transcription: "-".to_string(),
                 };
 
                 files.push(file);
@@ -273,13 +327,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 conn.execute_batch(CREATE_TABLE).unwrap();
 
                 let mut insert_stmt = conn
-                    .prepare("INSERT INTO files (id, duration, audio) VALUES (?, ?, row(?, ?))")
+                    .prepare("INSERT INTO files (id, transcription, duration, audio) VALUES (?, ?, ?, row(?, ?))")
                     .unwrap();
 
                 conn.execute_batch("BEGIN TRANSACTION").unwrap();
-                for file in files {
+                for (idx, file) in files.iter().enumerate() {
                     let _ = insert_stmt.execute(params![
-                        file.id,
+                        idx,
+                        file.transcription,
                         file.duration,
                         file.audio.path.clone(),
                         file.audio.bytes.clone(),
@@ -291,7 +346,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     eprintln!("Failed to close connection: {:?}", e);
                 }
             } else if args.format == Format::Parquet {
-                let _ = write_files_to_parquet(path.clone(), &files);
+                let _ = write_files_to_parquet(path.clone(), &files, args.parquet_compression);
             }
         });
 
