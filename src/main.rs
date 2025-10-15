@@ -11,6 +11,7 @@ use arrow::record_batch::RecordBatch;
 use clap::{Parser, ValueEnum};
 use duckdb::{Connection, params};
 use parquet::arrow::arrow_writer::ArrowWriter;
+use parquet::basic::Compression;
 use parquet::file::properties::WriterProperties;
 use rayon::prelude::*;
 use recv_dir::{Filter, MaxDepth, NoSymlink, RecursiveDirIterator};
@@ -151,7 +152,9 @@ fn write_files_to_parquet<P: AsRef<Path>>(output_path: P, files: &[File]) -> Res
     let batch = RecordBatch::try_new(schema.clone(), vec![id_array, duration_array, audio_array])?;
 
     let file = StdFile::create(output_path)?;
-    let props = WriterProperties::builder().build();
+    let props = WriterProperties::builder()
+        .set_compression(Compression::SNAPPY)
+        .build();
 
     let mut writer = ArrowWriter::try_new(file, schema, Some(props))?;
 
