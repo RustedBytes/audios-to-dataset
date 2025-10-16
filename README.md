@@ -57,3 +57,26 @@ podman machine set --cpus 4 --memory 8192
 ```shell
 goreleaser build --clean --snapshot --id audios-to-dataset --timeout 60m
 ```
+
+## Data Viewer audio on HF
+
+Insert the following header to `README.md` file on Hugging Face if you want to see audio HTML tag to listen to audios in the Data Viewer.
+
+```
+---
+dataset_info:
+  features:
+  - name: audio
+    dtype: audio
+  - name: duration
+    dtype: float64
+  - name: transcription
+    dtype: string
+task_categories:
+- automatic-speech-recognition
+tags:
+  - audio
+  - speech-processing
+---
+```
+
