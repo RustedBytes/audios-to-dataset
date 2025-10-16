@@ -5,13 +5,17 @@ on:
       - '*'
 jobs:
   build-and-release:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     steps:
+      - name: Install MUSL for "x86_64-unknown-linux-musl" target
+        run: sudo apt install -y musl-tools
       - name: Checkout code
         uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: stable
+      - name: Add "x86_64-unknown-linux-musl" target
+        run: rustup target add x86_64-unknown-linux-musl
       - uses: Swatinem/rust-cache@v2
         with:
           key: stable
@@ -21,10 +25,10 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: audios-to-dataset
-          path: target/release/audios-to-dataset
+          path: target/x86_64-unknown-linux-musl/release/audios-to-dataset
       - name: Create GitHub Release & Upload Asset
         uses: softprops/action-gh-release@v2
         with:
-          files: target/release/audios-to-dataset
+          files: target/x86_64-unknown-linux-musl/release/audios-to-dataset
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
