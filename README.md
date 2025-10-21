@@ -11,7 +11,7 @@ Options:
       --input <INPUT>
           The path to the input folder (by default, the program will scan the entire folder recursively)
       --format <FORMAT>
-          The format of the output database files [default: parquet] [possible values: duckdb, parquet]
+          The format of the output database files [default: parquet] [possible values: duck-db, parquet]
       --files-per-db <FILES_PER_DB>
           How many files to put in each database [default: 500]
       --max-depth-size <MAX_DEPTH_SIZE>
@@ -22,6 +22,10 @@ Options:
           The number of threads used for processing [default: 5]
       --output <OUTPUT>
           The path to the output files
+      --parquet-compression <PARQUET_COMPRESSION>
+          The compression algorithm to use for Parquet files [default: snappy] [possible values: uncompressed, snappy, gzip, lzo, brotli, lz4, zstd, lz4-raw]
+      --metadata-file <METADATA_FILE>
+          CSV file where transcriptions reside
   -h, --help
           Print help
   -V, --version
