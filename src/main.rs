@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs::File as StdFile;
 use std::path::Path;
 use std::path::PathBuf;
@@ -80,6 +81,10 @@ struct Args {
     #[arg(long)]
     #[clap(value_enum, default_value_t = ParquetCompressionChoice::Snappy)]
     parquet_compression: ParquetCompressionChoice,
+
+    /// CSV file where transcriptions reside
+    #[arg(long)]
+    metadata_file: Option<PathBuf>,
 }
 
 const CREATE_TABLE: &str = r"
@@ -126,7 +131,7 @@ fn write_files_to_parquet<P: AsRef<Path>>(
 
     let sr_data: Vec<Option<i32>> = files
         .iter()
-        .map(|file| Some(file.audio.sampling_rate.clone()))
+        .map(|file| Some(file.audio.sampling_rate))
         .collect();
 
     let path_data: Vec<Option<String>> = files
@@ -187,6 +192,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     rayon::ThreadPoolBuilder::new()
         .num_threads(args.num_threads)
         .build_global()?;
+
+    let transcriptions: HashMap<String, String> = if let Some(metadata_path) = &args.metadata_file {
+        let df = CsvReadOptions::default()
+            .with_has_header(true)
+            .try_into_reader_with_file_path(Some(metadata_path.clone()))?
+            .finish()?;
+
+        let file_name_col = df.column("file_name")?.str()?;
+        let transcription_col = df.column("transcription")?.str()?;
+
+        file_name_col
+            .into_iter()
+            .zip(transcription_col)
+            .filter_map(|(name, trans)| {
+                name.map(|n| (n.to_string(), trans.unwrap_or("-").to_string()))
+            })
+            .collect()
+    } else {
+        HashMap::new()
+    };
 
     if !args.input.exists() {
         eprintln!("Input folder does not exist: {:?}", args.input);
@@ -286,6 +311,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 };
 
+                let transcription = transcriptions.get(&file_name).map(|s| s.as_str()).unwrap_or("-").to_string();
+
                 let file = File {
                     duration,
                     audio: Audio {
@@ -293,7 +320,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         sampling_rate: sr,
                         bytes: buffer,
                     },
-                    transcription: "-".to_string(),
+                    transcription,
                 };
 
                 files.push(file);

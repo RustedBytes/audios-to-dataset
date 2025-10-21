@@ -18,7 +18,10 @@ anyhow = "1.0"
 rayon = { version = "1.11.0" }
 hound = "3.5.1"
 polars-io = "0.51.0"
+csv = "1.4.0"
 
 [profile.release]
 opt-level = 3
 lto = true
+strip = true
+debug = false
