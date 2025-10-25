@@ -198,96 +198,6 @@ fn write_files_to_parquet<P: AsRef<Path>>(
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use polars::prelude::{ParquetReader, SerReader};
-    use std::fs::File as StdFile;
-    use std::path::Path;
-    use tempfile::tempdir;
-
-    #[test]
-    fn normalized_relative_path_cleans_input_paths() {
-        let path = Path::new("./nested/./folder/file.wav");
-        assert_eq!(normalized_relative_path(path), "nested/./folder/file.wav");
-
-        let windows_path = Path::new(r".\audio\file.wav");
-        assert_eq!(normalized_relative_path(windows_path), "audio/file.wav");
-    }
-
-    #[test]
-    fn normalized_relative_path_str_normalizes_separators() {
-        let input = r".\segment\clip.wav";
-        assert_eq!(
-            normalized_relative_path_str(input),
-            "segment/clip.wav".to_string()
-        );
-
-        let already_clean = "dataset/audio.wav";
-        assert_eq!(
-            normalized_relative_path_str(already_clean),
-            already_clean.to_string()
-        );
-    }
-
-    #[test]
-    fn write_files_to_parquet_persists_audio_records() -> anyhow::Result<()> {
-        let temp_dir = tempdir()?;
-        let output_path = temp_dir.path().join("sample.parquet");
-
-        let bytes = vec![0_u8, 1, 2, 3, 4];
-        let files = vec![File {
-            duration: 1.25,
-            audio: Audio {
-                path: "clip.wav".to_string(),
-                sampling_rate: 16_000,
-                bytes: bytes.clone(),
-            },
-            transcription: "hello world".to_string(),
-        }];
-
-        write_files_to_parquet(&output_path, &files, ParquetCompressionChoice::Snappy)?;
-
-        let mut file = StdFile::open(&output_path)?;
-        let df = ParquetReader::new(&mut file).finish()?;
-
-        assert_eq!(df.height(), 1);
-
-        let duration = df.column("duration")?.f64()?.get(0).unwrap();
-        assert!((duration - 1.25).abs() < f64::EPSILON);
-
-        let transcription = df.column("transcription")?.str()?.get(0);
-        assert_eq!(transcription, Some("hello world"));
-
-        let audio_struct = df.column("audio")?.struct_()?;
-
-        let path_value = audio_struct
-            .field_by_name("path")
-            .expect("path field to exist")
-            .str()?
-            .get(0)
-            .map(|s| s.to_string());
-        assert_eq!(path_value, Some("clip.wav".to_string()));
-
-        let sr_value = audio_struct
-            .field_by_name("sampling_rate")
-            .expect("sampling_rate field to exist")
-            .i32()?
-            .get(0);
-        assert_eq!(sr_value, Some(16_000));
-
-        let bytes_value = audio_struct
-            .field_by_name("bytes")
-            .expect("bytes field to exist")
-            .binary()?
-            .get(0)
-            .map(|b| b.to_vec());
-        assert_eq!(bytes_value, Some(bytes));
-
-        Ok(())
-    }
-}
-
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
@@ -304,34 +214,40 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .try_into_reader_with_file_path(Some(metadata_path.clone()))?
             .finish()?;
 
-        let file_name_col = df.column("file_name")?.str()?;
         let transcription_col = df.column("transcription")?.str()?;
 
         let mut by_relative_path = HashMap::new();
         let mut by_name = HashMap::new();
         let row_count = df.height();
-        let transcriptions: Vec<String> = (0..row_count)
-            .map(|idx| transcription_col.get(idx).unwrap_or("-").to_string())
-            .collect();
 
         if let Ok(relative_path_col) = df.column("relative_path") {
             let relative_path_col = relative_path_col.str()?;
 
             for idx in 0..row_count {
                 if let Some(relative_path) = relative_path_col.get(idx) {
-                    let key = normalized_relative_path_str(relative_path);
-                    by_relative_path
-                        .entry(key)
-                        .or_insert_with(|| transcriptions[idx].clone());
+                    if let Some(transcription) = transcription_col.get(idx) {
+                        let key = normalized_relative_path_str(relative_path);
+                        if !key.is_empty() {
+                            by_relative_path
+                                .entry(key)
+                                .or_insert_with(|| transcription.to_string());
+                        }
+                    }
                 }
             }
         }
 
-        for idx in 0..row_count {
-            if let Some(name) = file_name_col.get(idx) {
-                by_name
-                    .entry(name.to_string())
-                    .or_insert_with(|| transcriptions[idx].clone());
+        if let Ok(file_name_col) = df.column("file_name") {
+            let file_name_col = file_name_col.str()?;
+
+            for idx in 0..row_count {
+                if let Some(name) = file_name_col.get(idx) {
+                    if let Some(transcription) = transcription_col.get(idx) {
+                        by_name
+                            .entry(name.to_string())
+                            .or_insert_with(|| transcription.to_string());
+                    }
+                }
             }
         }
 
@@ -458,10 +374,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 };
 
-                let transcription = transcriptions_by_rel
+                let transcription = transcriptions_by_rel // Always try relative path first
                     .get(&relative_path_str)
-                    .or_else(|| transcriptions_by_name.get(&file_name))
                     .cloned()
+                    .or_else(|| transcriptions_by_name.get(&file_name).cloned()) // Fallback to filename
                     .unwrap_or_else(|| "-".to_string());
 
                 let file = File {
@@ -507,4 +423,94 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use polars::prelude::{ParquetReader, SerReader};
+    use std::fs::File as StdFile;
+    use std::path::Path;
+    use tempfile::tempdir;
+
+    #[test]
+    fn normalized_relative_path_cleans_input_paths() {
+        let path = Path::new("./nested/./folder/file.wav");
+        assert_eq!(normalized_relative_path(path), "nested/./folder/file.wav");
+
+        let windows_path = Path::new(r".\audio\file.wav");
+        assert_eq!(normalized_relative_path(windows_path), "audio/file.wav");
+    }
+
+    #[test]
+    fn normalized_relative_path_str_normalizes_separators() {
+        let input = r".\segment\clip.wav";
+        assert_eq!(
+            normalized_relative_path_str(input),
+            "segment/clip.wav".to_string()
+        );
+
+        let already_clean = "dataset/audio.wav";
+        assert_eq!(
+            normalized_relative_path_str(already_clean),
+            already_clean.to_string()
+        );
+    }
+
+    #[test]
+    fn write_files_to_parquet_persists_audio_records() -> anyhow::Result<()> {
+        let temp_dir = tempdir()?;
+        let output_path = temp_dir.path().join("sample.parquet");
+
+        let bytes = vec![0_u8, 1, 2, 3, 4];
+        let files = vec![File {
+            duration: 1.25,
+            audio: Audio {
+                path: "clip.wav".to_string(),
+                sampling_rate: 16_000,
+                bytes: bytes.clone(),
+            },
+            transcription: "hello world".to_string(),
+        }];
+
+        write_files_to_parquet(&output_path, &files, ParquetCompressionChoice::Snappy)?;
+
+        let mut file = StdFile::open(&output_path)?;
+        let df = ParquetReader::new(&mut file).finish()?;
+
+        assert_eq!(df.height(), 1);
+
+        let duration = df.column("duration")?.f64()?.get(0).unwrap();
+        assert!((duration - 1.25).abs() < f64::EPSILON);
+
+        let transcription = df.column("transcription")?.str()?.get(0);
+        assert_eq!(transcription, Some("hello world"));
+
+        let audio_struct = df.column("audio")?.struct_()?;
+
+        let path_value = audio_struct
+            .field_by_name("path")
+            .expect("path field to exist")
+            .str()?
+            .get(0)
+            .map(|s| s.to_string());
+        assert_eq!(path_value, Some("clip.wav".to_string()));
+
+        let sr_value = audio_struct
+            .field_by_name("sampling_rate")
+            .expect("sampling_rate field to exist")
+            .i32()?
+            .get(0);
+        assert_eq!(sr_value, Some(16_000));
+
+        let bytes_value = audio_struct
+            .field_by_name("bytes")
+            .expect("bytes field to exist")
+            .binary()?
+            .get(0)
+            .map(|b| b.to_vec());
+        assert_eq!(bytes_value, Some(bytes));
+
+        Ok(())
+    }
 }

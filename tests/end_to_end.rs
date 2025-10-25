@@ -6,7 +6,7 @@ use anyhow::Result;
 use assert_cmd::Command;
 use hound::{SampleFormat, WavSpec, WavWriter};
 use polars::prelude::{ParquetReader, SerReader};
-use tempfile::{tempdir, NamedTempFile};
+use tempfile::{NamedTempFile, tempdir};
 
 #[test]
 fn generates_parquet_dataset_with_metadata() -> Result<()> {
@@ -81,6 +81,51 @@ fn generates_parquet_dataset_with_metadata() -> Result<()> {
         .get(0)
         .map(|b| b.to_vec());
     assert_eq!(bytes_value, Some(expected_bytes));
+
+    Ok(())
+}
+
+#[test]
+fn generates_parquet_dataset_with_metadata_fallback_to_filename() -> Result<()> {
+    let input_dir = tempdir()?;
+    let output_dir = tempdir()?;
+
+    let wav_path = input_dir.path().join("fallback.wav");
+    create_test_wav(&wav_path, 22_050, 22_050)?;
+
+    let mut metadata = NamedTempFile::new()?;
+    metadata.write_all(b"file_name,transcription\nfallback.wav,using filename\n")?;
+    metadata.flush()?;
+
+    Command::cargo_bin("audios-to-dataset")?
+        .arg("--input")
+        .arg(input_dir.path())
+        .arg("--output")
+        .arg(output_dir.path())
+        .arg("--format")
+        .arg("parquet")
+        .arg("--files-per-db")
+        .arg("1")
+        .arg("--num-threads")
+        .arg("1")
+        .arg("--metadata-file")
+        .arg(metadata.path())
+        .assert()
+        .success();
+
+    let output_file = output_dir.path().join("0.parquet");
+    assert!(
+        output_file.exists(),
+        "expected Parquet file at {:?}",
+        output_file
+    );
+
+    let mut file = File::open(&output_file)?;
+    let df = ParquetReader::new(&mut file).finish()?;
+    assert_eq!(df.height(), 1);
+
+    let transcription = df.column("transcription")?.str()?.get(0);
+    assert_eq!(transcription, Some("using filename"));
 
     Ok(())
 }
