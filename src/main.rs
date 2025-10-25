@@ -224,14 +224,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let relative_path_col = relative_path_col.str()?;
 
             for idx in 0..row_count {
-                if let Some(relative_path) = relative_path_col.get(idx) {
-                    if let Some(transcription) = transcription_col.get(idx) {
-                        let key = normalized_relative_path_str(relative_path);
-                        if !key.is_empty() {
-                            by_relative_path
-                                .entry(key)
-                                .or_insert_with(|| transcription.to_string());
-                        }
+                if let Some(relative_path) = relative_path_col.get(idx)
+                    && let Some(transcription) = transcription_col.get(idx)
+                {
+                    let key = normalized_relative_path_str(relative_path);
+                    if !key.is_empty() {
+                        by_relative_path
+                            .entry(key)
+                            .or_insert_with(|| transcription.to_string());
                     }
                 }
             }
@@ -241,12 +241,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let file_name_col = file_name_col.str()?;
 
             for idx in 0..row_count {
-                if let Some(name) = file_name_col.get(idx) {
-                    if let Some(transcription) = transcription_col.get(idx) {
-                        by_name
-                            .entry(name.to_string())
-                            .or_insert_with(|| transcription.to_string());
-                    }
+                if let Some(name) = file_name_col.get(idx)
+                    && let Some(transcription) = transcription_col.get(idx)
+                {
+                    by_name
+                        .entry(name.to_string())
+                        .or_insert_with(|| transcription.to_string());
                 }
             }
         }
@@ -336,7 +336,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 file.read_to_end(&mut buffer).unwrap();
 
                 let relative_path_str = {
-                    let normalized = normalized_relative_path(&file_path);
+                    let normalized = normalized_relative_path(file_path);
                     if normalized.is_empty() {
                         file_path
                             .file_name()
