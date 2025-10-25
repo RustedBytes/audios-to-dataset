@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::fs::create_dir_all;
 use std::fs::File as StdFile;
 use std::path::Path;
 use std::path::PathBuf;
@@ -266,7 +267,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     if !args.output.exists() {
-        std::fs::create_dir_all(&args.output)?;
+        create_dir_all(&args.output)?;
 
         println!("Created output folder: {:?}", args.output);
     }
