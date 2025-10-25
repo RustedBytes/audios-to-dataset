@@ -112,6 +112,18 @@ const AUDIO_MIME_TYPES: [&str; 12] = [
     "audio/aac",
 ];
 
+fn normalized_relative_path(path: &Path) -> String {
+    let normalized = path.to_string_lossy().replace('\\', "/");
+    normalized.trim_start_matches("./").to_string()
+}
+
+fn normalized_relative_path_str(value: &str) -> String {
+    value
+        .replace('\\', "/")
+        .trim_start_matches("./")
+        .to_string()
+}
+
 fn write_files_to_parquet<P: AsRef<Path>>(
     output_path: P,
     files: &[File],
@@ -186,6 +198,96 @@ fn write_files_to_parquet<P: AsRef<Path>>(
     Ok(())
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use polars::prelude::{ParquetReader, SerReader};
+    use std::fs::File as StdFile;
+    use std::path::Path;
+    use tempfile::tempdir;
+
+    #[test]
+    fn normalized_relative_path_cleans_input_paths() {
+        let path = Path::new("./nested/./folder/file.wav");
+        assert_eq!(normalized_relative_path(path), "nested/./folder/file.wav");
+
+        let windows_path = Path::new(r".\audio\file.wav");
+        assert_eq!(normalized_relative_path(windows_path), "audio/file.wav");
+    }
+
+    #[test]
+    fn normalized_relative_path_str_normalizes_separators() {
+        let input = r".\segment\clip.wav";
+        assert_eq!(
+            normalized_relative_path_str(input),
+            "segment/clip.wav".to_string()
+        );
+
+        let already_clean = "dataset/audio.wav";
+        assert_eq!(
+            normalized_relative_path_str(already_clean),
+            already_clean.to_string()
+        );
+    }
+
+    #[test]
+    fn write_files_to_parquet_persists_audio_records() -> anyhow::Result<()> {
+        let temp_dir = tempdir()?;
+        let output_path = temp_dir.path().join("sample.parquet");
+
+        let bytes = vec![0_u8, 1, 2, 3, 4];
+        let files = vec![File {
+            duration: 1.25,
+            audio: Audio {
+                path: "clip.wav".to_string(),
+                sampling_rate: 16_000,
+                bytes: bytes.clone(),
+            },
+            transcription: "hello world".to_string(),
+        }];
+
+        write_files_to_parquet(&output_path, &files, ParquetCompressionChoice::Snappy)?;
+
+        let mut file = StdFile::open(&output_path)?;
+        let df = ParquetReader::new(&mut file).finish()?;
+
+        assert_eq!(df.height(), 1);
+
+        let duration = df.column("duration")?.f64()?.get(0).unwrap();
+        assert!((duration - 1.25).abs() < f64::EPSILON);
+
+        let transcription = df.column("transcription")?.str()?.get(0);
+        assert_eq!(transcription, Some("hello world"));
+
+        let audio_struct = df.column("audio")?.struct_()?;
+
+        let path_value = audio_struct
+            .field_by_name("path")
+            .expect("path field to exist")
+            .str()?
+            .get(0)
+            .map(|s| s.to_string());
+        assert_eq!(path_value, Some("clip.wav".to_string()));
+
+        let sr_value = audio_struct
+            .field_by_name("sampling_rate")
+            .expect("sampling_rate field to exist")
+            .i32()?
+            .get(0);
+        assert_eq!(sr_value, Some(16_000));
+
+        let bytes_value = audio_struct
+            .field_by_name("bytes")
+            .expect("bytes field to exist")
+            .binary()?
+            .get(0)
+            .map(|b| b.to_vec());
+        assert_eq!(bytes_value, Some(bytes));
+
+        Ok(())
+    }
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
@@ -193,7 +295,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .num_threads(args.num_threads)
         .build_global()?;
 
-    let transcriptions: HashMap<String, String> = if let Some(metadata_path) = &args.metadata_file {
+    let (transcriptions_by_rel, transcriptions_by_name): (
+        HashMap<String, String>,
+        HashMap<String, String>,
+    ) = if let Some(metadata_path) = &args.metadata_file {
         let df = CsvReadOptions::default()
             .with_has_header(true)
             .try_into_reader_with_file_path(Some(metadata_path.clone()))?
@@ -202,15 +307,37 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let file_name_col = df.column("file_name")?.str()?;
         let transcription_col = df.column("transcription")?.str()?;
 
-        file_name_col
-            .into_iter()
-            .zip(transcription_col)
-            .filter_map(|(name, trans)| {
-                name.map(|n| (n.to_string(), trans.unwrap_or("-").to_string()))
-            })
-            .collect()
+        let mut by_relative_path = HashMap::new();
+        let mut by_name = HashMap::new();
+        let row_count = df.height();
+        let transcriptions: Vec<String> = (0..row_count)
+            .map(|idx| transcription_col.get(idx).unwrap_or("-").to_string())
+            .collect();
+
+        if let Ok(relative_path_col) = df.column("relative_path") {
+            let relative_path_col = relative_path_col.str()?;
+
+            for idx in 0..row_count {
+                if let Some(relative_path) = relative_path_col.get(idx) {
+                    let key = normalized_relative_path_str(relative_path);
+                    by_relative_path
+                        .entry(key)
+                        .or_insert_with(|| transcriptions[idx].clone());
+                }
+            }
+        }
+
+        for idx in 0..row_count {
+            if let Some(name) = file_name_col.get(idx) {
+                by_name
+                    .entry(name.to_string())
+                    .or_insert_with(|| transcriptions[idx].clone());
+            }
+        }
+
+        (by_relative_path, by_name)
     } else {
-        HashMap::new()
+        (HashMap::new(), HashMap::new())
     };
 
     if !args.input.exists() {
@@ -221,6 +348,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("Input path is not a directory: {:?}", args.input);
         return Ok(());
     }
+
+    let canonical_input = args
+        .input
+        .canonicalize()
+        .unwrap_or_else(|_| args.input.clone());
 
     if !args.output.exists() {
         std::fs::create_dir_all(&args.output)?;
@@ -287,10 +419,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             let mut files = Vec::new();
-            for file_name in chunk {
-                let mut file = std::fs::File::open(file_name.clone()).unwrap();
+            for file_path in chunk {
+                let mut file = std::fs::File::open(file_path.clone()).unwrap();
                 let mut buffer = Vec::new();
                 file.read_to_end(&mut buffer).unwrap();
+
+                let relative_path = file_path
+                    .strip_prefix(&args.input)
+                    .ok()
+                    .or_else(|| file_path.strip_prefix(&canonical_input).ok());
+                let relative_path_str = relative_path
+                    .map(|path| normalized_relative_path(path))
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| {
+                        file_path
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .map(|s| s.to_string())
+                            .unwrap_or_else(|| file_path.to_string_lossy().to_string())
+                    });
 
                 let (duration, sr) = match WavReader::new(&buffer[..]) {
                     Ok(reader) => {
@@ -300,23 +447,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Err(_) => (0.0, 0),
                 };
 
-                let file_name = match file_name.file_name().and_then(|s| s.to_str()) {
+                let file_name = match file_path.file_name().and_then(|s| s.to_str()) {
                     Some(name) => name.to_string(),
                     None => {
                         eprintln!(
                             "Could not get file name as a string for {:?}, skipping.",
-                            file_name
+                            file_path
                         );
                         continue;
                     }
                 };
 
-                let transcription = transcriptions.get(&file_name).map(|s| s.as_str()).unwrap_or("-").to_string();
+                let transcription = transcriptions_by_rel
+                    .get(&relative_path_str)
+                    .or_else(|| transcriptions_by_name.get(&file_name))
+                    .cloned()
+                    .unwrap_or_else(|| "-".to_string());
 
                 let file = File {
                     duration,
                     audio: Audio {
-                        path: file_name,
+                        path: relative_path_str,
                         sampling_rate: sr,
                         bytes: buffer,
                     },

@@ -1,6 +1,6 @@
 [package]
 name = "audios-to-dataset"
-version = "0.2.5"
+version = "0.3.0"
 edition = "2024"
 
 [dependencies]
@@ -19,6 +19,10 @@ rayon = { version = "1.11.0" }
 hound = "3.5.1"
 polars-io = "0.51.0"
 csv = "1.4.0"
+
+[dev-dependencies]
+assert_cmd = "2.0"
+tempfile = "3.10"
 
 [profile.release]
 opt-level = 3

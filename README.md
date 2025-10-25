@@ -27,7 +27,7 @@ cargo run --release -- --help
 ## Quick Start
 
 1. Prepare an input directory that contains audio files (WAV, MP3, FLAC, OGG, AAC, …).  
-2. (Optional) Create a CSV file with the columns `file_name` and `transcription` if you want to attach transcripts.
+2. (Optional) Create a CSV file with the columns `file_name` and `transcription` (plus an optional `relative_path`) if you want to attach transcripts.
 3. Run the CLI and point it at the input directory and an empty output folder:
 
 ```shell
@@ -49,10 +49,13 @@ During execution the tool:
 
 Use `--metadata-file path/to/metadata.csv` to provide transcripts. The CSV is expected to have headers and contain:
 
-| column      | description                                                                 |
-|-------------|-----------------------------------------------------------------------------|
-| `file_name` | File name (not path) matching the audio files found during the scan.        |
-| `transcription` | Text transcription that will be associated with the audio sample.      |
+| column           | description                                                                 |
+|------------------|-----------------------------------------------------------------------------|
+| `file_name`      | Base file name matching the audio files found during the scan.              |
+| `relative_path`* | Path (relative to `--input`) for disambiguating duplicate file names.       |
+| `transcription`  | Text transcription that will be associated with the audio sample.           |
+
+`*` Optional. When you have multiple files with the same name under different subdirectories, include a `relative_path` column (use forward slashes) so each transcription maps to the correct file.
 
 Rows without a matching audio file are skipped. When a match is missing the CLI stores `"-"` as the placeholder transcript.
 
@@ -70,14 +73,14 @@ Options:
       --num-threads <N>               Worker threads used for processing [default: 5]
       --output <OUTPUT>               Destination folder for `.parquet` / `.duckdb` files
       --parquet-compression <TYPE>    Compression (Snappy, Zstd, Gzip, …) [default: snappy]
-      --metadata-file <CSV>           CSV with `file_name` + `transcription` columns
+      --metadata-file <CSV>           CSV with `file_name` + `transcription` columns (and optional `relative_path`)
   -h, --help                          Print help
   -V, --version                       Print version
 ```
 
 ## Output Details
 
-- **Parquet** files contain a struct column named `audio` with `bytes`, `sampling_rate`, and `path`, plus `duration` and `transcription` columns. Hugging Face-specific metadata is embedded in the Parquet schema so that the Hub Data Viewer recognizes the dataset automatically.
+- **Parquet** files contain a struct column named `audio` with `bytes`, `sampling_rate`, and `path` (relative to your `--input`), plus `duration` and `transcription` columns. Hugging Face-specific metadata is embedded in the Parquet schema so that the Hub Data Viewer recognizes the dataset automatically.
 - **DuckDB** files create a `files` table with the same schema. Existing files in the output directory are replaced shard by shard.
 - When `--check-mime-type` is enabled the CLI keeps a curated allow list of audio MIME types; others are skipped with a log line.
 - Durations are derived from WAV headers; non-WAV files remain with `duration = 0.0`.
