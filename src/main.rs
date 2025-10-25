@@ -265,11 +265,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    let canonical_input = args
-        .input
-        .canonicalize()
-        .unwrap_or_else(|_| args.input.clone());
-
     if !args.output.exists() {
         std::fs::create_dir_all(&args.output)?;
 
@@ -340,20 +335,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let mut buffer = Vec::new();
                 file.read_to_end(&mut buffer).unwrap();
 
-                let relative_path = file_path
-                    .strip_prefix(&args.input)
-                    .ok()
-                    .or_else(|| file_path.strip_prefix(&canonical_input).ok());
-                let relative_path_str = relative_path
-                    .map(|path| normalized_relative_path(path))
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or_else(|| {
+                let relative_path_str = {
+                    let normalized = normalized_relative_path(&file_path);
+                    if normalized.is_empty() {
                         file_path
                             .file_name()
                             .and_then(|name| name.to_str())
                             .map(|s| s.to_string())
-                            .unwrap_or_else(|| file_path.to_string_lossy().to_string())
-                    });
+                            .unwrap_or_else(|| file_path.to_string_lossy().to_string())                    } else {
+                        normalized
+                    }
+                };
 
                 let (duration, sr) = match WavReader::new(&buffer[..]) {
                     Ok(reader) => {
