@@ -4,7 +4,7 @@ version = "0.3.1"
 edition = "2024"
 
 [dependencies]
-clap = { version = "4.5.49", features = ["derive"] }
+clap = { version = "4.5.51", features = ["derive"] }
 duckdb = { version = "1.4.1", features = ["bundled"] }
 recv-dir = "0.3.1"
 tree_magic_mini = { version = "3.2.0", features = ["with-gpl-data"] }
