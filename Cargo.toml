@@ -21,7 +21,7 @@ polars-io = "0.51.0"
 csv = "1.4.0"
 
 [dev-dependencies]
-assert_cmd = "2.0"
+assert_cmd = "2.1"
 tempfile = "3.10"
 
 [profile.release]
