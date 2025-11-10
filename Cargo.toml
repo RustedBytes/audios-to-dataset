@@ -9,7 +9,7 @@ duckdb = { version = "1.4.1", features = ["bundled"] }
 recv-dir = "0.3.1"
 tree_magic_mini = { version = "3.2.0", features = ["with-gpl-data"] }
 
-polars = { version = "0.51.0", features = ["parquet", "dtype-struct"] }
+polars = { version = "0.52.0", features = ["parquet", "dtype-struct"] }
 
 serde = { version = "1", features = ["derive"] }
 serde_derive = "1.0"
