@@ -422,6 +422,7 @@ dependencies = [
  "recv-dir",
  "serde",
  "serde_derive",
+ "serde_json",
  "tempfile",
  "tree_magic_mini",
 ]

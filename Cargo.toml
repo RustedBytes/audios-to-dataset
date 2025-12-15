@@ -13,6 +13,7 @@ polars = { version = "0.52.0", features = ["parquet", "dtype-struct"] }
 
 serde = { version = "1", features = ["derive"] }
 serde_derive = "1.0"
+serde_json = "1.0"
 anyhow = "1.0"
 
 rayon = { version = "1.11.0" }

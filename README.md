@@ -6,7 +6,7 @@
 
 - Recursively scans your input directory (with optional MIME-type filtering) and trims the traversal depth to a configurable level.
 - Batches audio into evenly sized databases with optional DuckDB or Parquet outputs and Hugging Face metadata embedded in the Parquet files.
-- Pulls per-file transcripts from a companion CSV so you can ship audio + text pairs without post-processing.
+- Pulls per-file metadata (CSV or JSONL) so you can ship audio + text pairs and any extra fields without post-processing.
 - Parallelizes decoding and packing across a configurable number of threads to keep local ingestion fast.
 - Populates audio duration by reading WAV headers when available, keeping non-WAV formats in the dataset with a zero duration fallback.
 
@@ -27,7 +27,7 @@ cargo run --release -- --help
 ## Quick Start
 
 1. Prepare an input directory that contains audio files (WAV, MP3, FLAC, OGG, AAC, …).  
-2. (Optional) Create a CSV file with the columns `file_name` and `transcription` (plus an optional `relative_path`) if you want to attach transcripts.
+2. (Optional) Create a CSV **or** JSONL file with the columns `file_name` and `transcription` (plus an optional `relative_path`) if you want to attach transcripts or other metadata fields.
 3. Run the CLI and point it at the input directory and an empty output folder:
 
 ```shell
@@ -45,11 +45,11 @@ During execution the tool:
 - writes files named `0.parquet`, `1.parquet`, … (or `.duckdb`) into the output directory, and
 - prints progress for each chunk.
 
-## Working With Transcriptions
+## Working With Metadata
 
-Use `--metadata-file path/to/metadata.csv` to provide transcripts. The CSV is expected to have headers and contain:
+Use `--metadata-file path/to/metadata.csv` or `--metadata-file path/to/metadata.jsonl` to provide transcripts and any other per-file metadata. The format is detected from the file extension.
 
-| column           | description                                                                 |
+| field            | description                                                                 |
 |------------------|-----------------------------------------------------------------------------|
 | `file_name`      | Base file name matching the audio files found during the scan.              |
 | `relative_path`* | Path (relative to `--input`) for disambiguating duplicate file names.       |
@@ -57,7 +57,15 @@ Use `--metadata-file path/to/metadata.csv` to provide transcripts. The CSV is ex
 
 `*` Optional. When you have multiple files with the same name under different subdirectories, include a `relative_path` column (use forward slashes) so each transcription maps to the correct file.
 
-Rows without a matching audio file are skipped. When a match is missing the CLI stores `"-"` as the placeholder transcript.
+- Extra columns in CSV files are preserved as string columns.
+- JSONL records can carry arbitrary fields; booleans and numbers keep their native types in the output datasets.
+- Rows without a matching audio file are skipped. When a match is missing the CLI stores `"-"` as the placeholder transcript.
+
+Example JSONL line:
+
+```jsonl
+{"relative_path":"clips/clip-1.wav","transcription":"hello world","speaker":"alice","verified":true,"snr":12.5}
+```
 
 ## Command Reference
 
@@ -73,15 +81,15 @@ Options:
       --num-threads <N>               Worker threads used for processing [default: 5]
       --output <OUTPUT>               Destination folder for `.parquet` / `.duckdb` files
       --parquet-compression <TYPE>    Compression (Snappy, Zstd, Gzip, …) [default: snappy]
-      --metadata-file <CSV>           CSV with `file_name` + `transcription` columns (and optional `relative_path`)
+      --metadata-file <PATH>          CSV or JSONL with `file_name`/`relative_path` plus `transcription` (extra fields allowed)
   -h, --help                          Print help
   -V, --version                       Print version
 ```
 
 ## Output Details
 
-- **Parquet** files contain a struct column named `audio` with `bytes`, `sampling_rate`, and `path` (relative to your `--input`), plus `duration` and `transcription` columns. Hugging Face-specific metadata is embedded in the Parquet schema so that the Hub Data Viewer recognizes the dataset automatically.
-- **DuckDB** files create a `files` table with the same schema. Existing files in the output directory are replaced shard by shard.
+- **Parquet** files contain a struct column named `audio` with `bytes`, `sampling_rate`, and `path` (relative to your `--input`), plus `duration`, `transcription`, and any extra metadata columns from your CSV/JSONL file. Hugging Face-specific metadata is embedded in the Parquet schema so that the Hub Data Viewer recognizes the dataset automatically.
+- **DuckDB** files create a `files` table with the same schema (including dynamic metadata columns). Existing files in the output directory are replaced shard by shard.
 - When `--check-mime-type` is enabled the CLI keeps a curated allow list of audio MIME types; others are skipped with a log line.
 - Durations are derived from WAV headers; non-WAV files remain with `duration = 0.0`.
 

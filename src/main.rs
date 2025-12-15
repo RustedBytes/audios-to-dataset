@@ -1,18 +1,24 @@
-use std::collections::HashMap;
-use std::fs::create_dir_all;
+use std::collections::{BTreeSet, HashMap};
 use std::fs::File as StdFile;
+use std::fs::create_dir_all;
 use std::path::Path;
 use std::path::PathBuf;
-use std::{io::Read, num::NonZeroUsize};
+use std::sync::Arc;
+use std::{
+    io::{BufRead, BufReader, Read},
+    num::NonZeroUsize,
+};
 
 use anyhow::Result;
 use clap::{Parser, ValueEnum};
-use duckdb::{Connection, params};
+use duckdb::types::Value as DuckValue;
+use duckdb::{Connection, params_from_iter};
 use hound::WavReader;
 use polars::prelude::*;
 use rayon::prelude::*;
 use recv_dir::{Filter, MaxDepth, NoSymlink, RecursiveDirIterator};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct Audio {
@@ -25,7 +31,7 @@ struct Audio {
 struct File {
     duration: f64,
     audio: Audio,
-    transcription: String,
+    metadata: HashMap<String, Value>,
 }
 
 #[derive(Clone, Debug, Copy, PartialEq, Eq, ValueEnum)]
@@ -83,20 +89,10 @@ struct Args {
     #[clap(value_enum, default_value_t = ParquetCompressionChoice::Snappy)]
     parquet_compression: ParquetCompressionChoice,
 
-    /// CSV file where transcriptions reside
+    /// Metadata file (CSV or JSONL) describing per-file fields
     #[arg(long)]
     metadata_file: Option<PathBuf>,
 }
-
-const CREATE_TABLE: &str = r"
-CREATE SEQUENCE seq;
-
-CREATE TABLE files (
-  id INTEGER PRIMARY KEY DEFAULT NEXTVAL('seq'),
-  duration DOUBLE,
-  transcription VARCHAR,
-  audio STRUCT(path VARCHAR, sampling_rate INTEGER, bytes BLOB)
-);";
 
 const AUDIO_MIME_TYPES: [&str; 12] = [
     "audio/mpeg",
@@ -125,16 +121,292 @@ fn normalized_relative_path_str(value: &str) -> String {
         .to_string()
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MetadataType {
+    String,
+    Bool,
+    Float64,
+}
+
+impl MetadataType {
+    fn merge(self, other: MetadataType) -> MetadataType {
+        if self == other {
+            self
+        } else {
+            MetadataType::String
+        }
+    }
+}
+
+#[derive(Default)]
+struct MetadataStore {
+    by_relative_path: HashMap<String, HashMap<String, Value>>,
+    by_name: HashMap<String, HashMap<String, Value>>,
+    keys: BTreeSet<String>,
+    types: HashMap<String, MetadataType>,
+}
+
+impl MetadataStore {
+    fn new() -> Self {
+        let mut store = MetadataStore::default();
+        store.ensure_transcription_key();
+        store
+    }
+
+    fn ensure_transcription_key(&mut self) {
+        self.keys.insert("transcription".to_string());
+        self.types
+            .entry("transcription".to_string())
+            .or_insert(MetadataType::String);
+    }
+
+    fn update_types_from_record(&mut self, metadata: &HashMap<String, Value>) {
+        for (key, value) in metadata {
+            self.keys.insert(key.clone());
+            if let Some(value_type) = infer_metadata_type(value) {
+                self.types
+                    .entry(key.clone())
+                    .and_modify(|current| *current = current.merge(value_type))
+                    .or_insert(value_type);
+            }
+        }
+    }
+
+    fn insert_record(
+        &mut self,
+        relative_path: Option<String>,
+        file_name: Option<String>,
+        metadata: HashMap<String, Value>,
+    ) {
+        if let Some(rel) = relative_path {
+            self.by_relative_path
+                .entry(rel)
+                .or_insert_with(|| metadata.clone());
+        }
+
+        if let Some(name) = file_name {
+            self.by_name.entry(name).or_insert(metadata);
+        }
+    }
+
+    fn metadata_for_file(&self, relative_path: &str, file_name: &str) -> HashMap<String, Value> {
+        let mut metadata = self
+            .by_relative_path
+            .get(relative_path)
+            .cloned()
+            .or_else(|| self.by_name.get(file_name).cloned())
+            .unwrap_or_default();
+
+        metadata
+            .entry("transcription".to_string())
+            .or_insert_with(|| Value::String("-".to_string()));
+
+        metadata
+    }
+}
+
+fn infer_metadata_type(value: &Value) -> Option<MetadataType> {
+    match value {
+        Value::Bool(_) => Some(MetadataType::Bool),
+        Value::Number(_) => Some(MetadataType::Float64),
+        Value::String(_) => Some(MetadataType::String),
+        Value::Null => None,
+        _ => Some(MetadataType::String),
+    }
+}
+
+fn sanitize_column_name(name: &str) -> String {
+    name.replace('"', "\"\"")
+}
+
+fn is_reserved_metadata_key(key: &str) -> bool {
+    matches!(key, "duration" | "audio" | "id")
+}
+
+enum MetadataFormat {
+    Csv,
+    Jsonl,
+}
+
+fn metadata_format_from_path(path: &Path) -> MetadataFormat {
+    let extension = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+
+    match extension.as_str() {
+        "jsonl" | "json" => MetadataFormat::Jsonl,
+        _ => MetadataFormat::Csv,
+    }
+}
+
+fn load_metadata_store(path: &Path) -> Result<MetadataStore> {
+    match metadata_format_from_path(path) {
+        MetadataFormat::Csv => load_csv_metadata(path),
+        MetadataFormat::Jsonl => load_jsonl_metadata(path),
+    }
+}
+
+fn load_csv_metadata(path: &Path) -> Result<MetadataStore> {
+    let mut reader = csv::Reader::from_path(path)?;
+    let headers = reader.headers()?.clone();
+    let mut store = MetadataStore::new();
+
+    for record in reader.records() {
+        let record = record?;
+        let mut file_name: Option<String> = None;
+        let mut relative_path: Option<String> = None;
+        let mut metadata = HashMap::new();
+
+        for (header, value) in headers.iter().zip(record.iter()) {
+            match header {
+                "file_name" => {
+                    if !value.is_empty() {
+                        file_name = Some(value.to_string());
+                    }
+                }
+                "relative_path" => {
+                    if !value.is_empty() {
+                        relative_path = Some(normalized_relative_path_str(value));
+                    }
+                }
+                _ => {
+                    if !value.is_empty() && !is_reserved_metadata_key(header) {
+                        metadata.insert(header.to_string(), Value::String(value.to_string()));
+                    }
+                }
+            }
+        }
+
+        metadata
+            .entry("transcription".to_string())
+            .or_insert_with(|| Value::String("-".to_string()));
+
+        store.update_types_from_record(&metadata);
+
+        if file_name.is_none() && relative_path.is_none() {
+            continue;
+        }
+
+        store.insert_record(relative_path, file_name, metadata);
+    }
+
+    Ok(store)
+}
+
+fn load_jsonl_metadata(path: &Path) -> Result<MetadataStore> {
+    let file = StdFile::open(path)?;
+    let reader = BufReader::new(file);
+    let mut store = MetadataStore::new();
+
+    for line in reader.lines() {
+        let line = line?;
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        let value: Value = serde_json::from_str(trimmed)?;
+        let Some(object) = value.as_object() else {
+            continue;
+        };
+
+        let mut file_name = object
+            .get("file_name")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .filter(|s| !s.is_empty());
+        let mut relative_path = object
+            .get("relative_path")
+            .and_then(|v| v.as_str())
+            .map(normalized_relative_path_str)
+            .filter(|s| !s.is_empty());
+
+        let mut metadata: HashMap<String, Value> = object
+            .iter()
+            .filter_map(|(key, value)| {
+                if key == "file_name" || key == "relative_path" || is_reserved_metadata_key(key) {
+                    return None;
+                }
+
+                Some((key.clone(), value.clone()))
+            })
+            .collect();
+
+        metadata
+            .entry("transcription".to_string())
+            .or_insert_with(|| Value::String("-".to_string()));
+
+        store.update_types_from_record(&metadata);
+
+        if file_name.is_none() && relative_path.is_none() {
+            continue;
+        }
+
+        store.insert_record(relative_path.take(), file_name.take(), metadata);
+    }
+
+    Ok(store)
+}
+
+fn build_create_table_sql(
+    metadata_keys: &BTreeSet<String>,
+    metadata_types: &HashMap<String, MetadataType>,
+) -> String {
+    let mut columns = vec![
+        "id INTEGER PRIMARY KEY DEFAULT NEXTVAL('seq')".to_string(),
+        "duration DOUBLE".to_string(),
+        "audio STRUCT(path VARCHAR, sampling_rate INTEGER, bytes BLOB)".to_string(),
+    ];
+
+    for key in metadata_keys {
+        let column_type = metadata_types
+            .get(key)
+            .copied()
+            .unwrap_or(MetadataType::String);
+        let sql_type = match column_type {
+            MetadataType::Bool => "BOOLEAN",
+            MetadataType::Float64 => "DOUBLE",
+            MetadataType::String => "VARCHAR",
+        };
+
+        columns.push(format!("\"{}\" {}", sanitize_column_name(key), sql_type));
+    }
+
+    format!(
+        "CREATE SEQUENCE seq; CREATE TABLE files ({columns});",
+        columns = columns.join(", ")
+    )
+}
+
+fn build_insert_sql(metadata_keys: &BTreeSet<String>) -> String {
+    let mut column_names = vec![
+        "id".to_string(),
+        "duration".to_string(),
+        "audio".to_string(),
+    ];
+    for key in metadata_keys {
+        column_names.push(format!("\"{}\"", sanitize_column_name(key)));
+    }
+
+    let mut placeholders = vec!["?".to_string(), "?".to_string(), "row(?, ?, ?)".to_string()];
+    placeholders.extend(std::iter::repeat_n("?".to_string(), metadata_keys.len()));
+
+    format!(
+        "INSERT INTO files ({columns}) VALUES ({placeholders})",
+        columns = column_names.join(", "),
+        placeholders = placeholders.join(", ")
+    )
+}
+
 fn write_files_to_parquet<P: AsRef<Path>>(
     output_path: P,
     files: &[File],
+    metadata_keys: &std::collections::BTreeSet<String>,
+    metadata_types: &HashMap<String, MetadataType>,
     compression: ParquetCompressionChoice,
 ) -> Result<()> {
-    let transcription_data: Vec<Option<String>> = files
-        .iter()
-        .map(|file| Some(file.transcription.clone()))
-        .collect();
-
     let duration_data: Vec<Option<f64>> = files.iter().map(|file| Some(file.duration)).collect();
 
     let bytes_data: Vec<Option<Vec<u8>>> = files
@@ -163,13 +435,48 @@ fn write_files_to_parquet<P: AsRef<Path>>(
     .into_series();
 
     let duration_series = Series::new("duration".into(), duration_data);
-    let transcription_series = Series::new("transcription".into(), transcription_data);
-
-    let mut df = DataFrame::new(vec![
+    let mut columns = vec![
         audio_struct_series.into_column(),
         duration_series.into_column(),
-        transcription_series.into_column(),
-    ])?;
+    ];
+
+    for key in metadata_keys {
+        let column_type = metadata_types
+            .get(key)
+            .copied()
+            .unwrap_or(MetadataType::String);
+
+        match column_type {
+            MetadataType::Bool => {
+                let data: Vec<Option<bool>> = files
+                    .iter()
+                    .map(|file| file.metadata.get(key).and_then(|v| v.as_bool()))
+                    .collect();
+                columns.push(Series::new(key.as_str().into(), data).into_column());
+            }
+            MetadataType::Float64 => {
+                let data: Vec<Option<f64>> = files
+                    .iter()
+                    .map(|file| file.metadata.get(key).and_then(|v| v.as_f64()))
+                    .collect();
+                columns.push(Series::new(key.as_str().into(), data).into_column());
+            }
+            MetadataType::String => {
+                let data: Vec<Option<String>> = files
+                    .iter()
+                    .map(|file| {
+                        file.metadata.get(key).map(|v| match v {
+                            Value::String(s) => s.clone(),
+                            _ => v.to_string(),
+                        })
+                    })
+                    .collect();
+                columns.push(Series::new(key.as_str().into(), data).into_column());
+            }
+        }
+    }
+
+    let mut df = DataFrame::new(columns)?;
 
     let pq_compression = match compression {
         ParquetCompressionChoice::Uncompressed => ParquetCompression::Uncompressed,
@@ -182,7 +489,31 @@ fn write_files_to_parquet<P: AsRef<Path>>(
         ParquetCompressionChoice::Lz4Raw => ParquetCompression::Lz4Raw,
     };
 
-    let hf_value = r#"{"info": {"features": {"audio": {"_type": "Audio"}, "duration": {"dtype": "float64", "_type": "Value"}, "transcription": {"dtype": "string", "_type": "Value"}}}}"#;
+    let mut features = serde_json::Map::new();
+    features.insert("audio".to_string(), serde_json::json!({"_type": "Audio"}));
+    features.insert(
+        "duration".to_string(),
+        serde_json::json!({"dtype": "float64", "_type": "Value"}),
+    );
+
+    for key in metadata_keys {
+        let dtype = match metadata_types
+            .get(key)
+            .copied()
+            .unwrap_or(MetadataType::String)
+        {
+            MetadataType::Bool => "bool",
+            MetadataType::Float64 => "float64",
+            MetadataType::String => "string",
+        };
+
+        features.insert(
+            key.clone(),
+            serde_json::json!({"dtype": dtype, "_type": "Value"}),
+        );
+    }
+
+    let hf_value = serde_json::json!({"info": {"features": features}});
 
     let custom_metadata =
         KeyValueMetadata::from_static(vec![("huggingface".to_string(), hf_value.to_string())]);
@@ -206,56 +537,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .num_threads(args.num_threads)
         .build_global()?;
 
-    let (transcriptions_by_rel, transcriptions_by_name): (
-        HashMap<String, String>,
-        HashMap<String, String>,
-    ) = if let Some(metadata_path) = &args.metadata_file {
-        let df = CsvReadOptions::default()
-            .with_has_header(true)
-            .try_into_reader_with_file_path(Some(metadata_path.clone()))?
-            .finish()?;
-
-        let transcription_col = df.column("transcription")?.str()?;
-
-        let mut by_relative_path = HashMap::new();
-        let mut by_name = HashMap::new();
-        let row_count = df.height();
-
-        if let Ok(relative_path_col) = df.column("relative_path") {
-            let relative_path_col = relative_path_col.str()?;
-
-            for idx in 0..row_count {
-                if let Some(relative_path) = relative_path_col.get(idx)
-                    && let Some(transcription) = transcription_col.get(idx)
-                {
-                    let key = normalized_relative_path_str(relative_path);
-                    if !key.is_empty() {
-                        by_relative_path
-                            .entry(key)
-                            .or_insert_with(|| transcription.to_string());
-                    }
-                }
-            }
-        }
-
-        if let Ok(file_name_col) = df.column("file_name") {
-            let file_name_col = file_name_col.str()?;
-
-            for idx in 0..row_count {
-                if let Some(name) = file_name_col.get(idx)
-                    && let Some(transcription) = transcription_col.get(idx)
-                {
-                    by_name
-                        .entry(name.to_string())
-                        .or_insert_with(|| transcription.to_string());
-                }
-            }
-        }
-
-        (by_relative_path, by_name)
+    let metadata_store = if let Some(metadata_path) = &args.metadata_file {
+        load_metadata_store(metadata_path)?
     } else {
-        (HashMap::new(), HashMap::new())
+        MetadataStore::new()
     };
+
+    let metadata_keys = metadata_store.keys.clone();
+    let metadata_types = metadata_store.types.clone();
+
+    let metadata_store = Arc::new(metadata_store);
+    let metadata_keys = Arc::new(metadata_keys);
+    let metadata_types = Arc::new(metadata_types);
 
     if !args.input.exists() {
         eprintln!("Input folder does not exist: {:?}", args.input);
@@ -272,6 +565,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("Created output folder: {:?}", args.output);
     }
 
+    let metadata_relative = args
+        .metadata_file
+        .as_ref()
+        .and_then(|path| path.strip_prefix(&args.input).ok())
+        .map(normalized_relative_path);
+
+    let metadata_absolute = args
+        .metadata_file
+        .as_ref()
+        .and_then(|path| std::fs::canonicalize(path).ok());
+
     // Scan the input folder for files
     let dir = RecursiveDirIterator::with_filter(
         &args.input,
@@ -287,6 +591,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("Skipping directory: {:?}", entry);
             continue;
         }
+
+        if let Some(target_relative) = &metadata_relative
+            && let Ok(entry_relative) = entry.strip_prefix(&args.input) {
+                let normalized_entry = normalized_relative_path(entry_relative);
+                if &normalized_entry == target_relative {
+                    println!("Skipping metadata file: {:?}", entry);
+                    continue;
+                }
+            }
+
+        if let Some(target_abs) = &metadata_absolute
+            && let Ok(entry_abs) = entry.canonicalize()
+                && &entry_abs == target_abs {
+                    println!("Skipping metadata file: {:?}", entry);
+                    continue;
+                }
 
         if args.check_mime_type {
             let mime_type = tree_magic_mini::from_filepath(&entry);
@@ -337,21 +657,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 file.read_to_end(&mut buffer).unwrap();
 
                 let relative_path_str = {
-                    let normalized = normalized_relative_path(file_path);
-                    if normalized.is_empty() {
+                    let normalized_relative = file_path
+                        .strip_prefix(&args.input)
+                        .map(normalized_relative_path)
+                        .unwrap_or_else(|_| normalized_relative_path(file_path));
+
+                    if normalized_relative.is_empty() {
                         file_path
                             .file_name()
                             .and_then(|name| name.to_str())
                             .map(|s| s.to_string())
-                            .unwrap_or_else(|| file_path.to_string_lossy().to_string())                    } else {
-                        normalized
+                            .unwrap_or_else(|| file_path.to_string_lossy().to_string())
+                    } else {
+                        normalized_relative
                     }
                 };
 
                 let (duration, sr) = match WavReader::new(&buffer[..]) {
                     Ok(reader) => {
                         let spec = reader.spec();
-                        (reader.duration() as f64 / spec.sample_rate as f64, spec.sample_rate as i32)
+                        (
+                            reader.duration() as f64 / spec.sample_rate as f64,
+                            spec.sample_rate as i32,
+                        )
                     }
                     Err(_) => (0.0, 0),
                 };
@@ -367,11 +695,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 };
 
-                let transcription = transcriptions_by_rel // Always try relative path first
-                    .get(&relative_path_str)
-                    .cloned()
-                    .or_else(|| transcriptions_by_name.get(&file_name).cloned()) // Fallback to filename
-                    .unwrap_or_else(|| "-".to_string());
+                let metadata = metadata_store.metadata_for_file(&relative_path_str, &file_name);
 
                 let file = File {
                     duration,
@@ -380,7 +704,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         sampling_rate: sr,
                         bytes: buffer,
                     },
-                    transcription,
+                    metadata,
                 };
 
                 files.push(file);
@@ -388,22 +712,46 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             if args.format == Format::DuckDB {
                 let conn = Connection::open(&path).unwrap();
-                conn.execute_batch(CREATE_TABLE).unwrap();
+                let create_sql =
+                    build_create_table_sql(metadata_keys.as_ref(), metadata_types.as_ref());
+                conn.execute_batch(&create_sql).unwrap();
 
-                let mut insert_stmt = conn
-                    .prepare("INSERT INTO files (id, transcription, duration, audio) VALUES (?, ?, ?, row(?, ?, ?))")
-                    .unwrap();
+                let insert_sql = build_insert_sql(metadata_keys.as_ref());
+                let mut insert_stmt = conn.prepare(&insert_sql).unwrap();
 
                 conn.execute_batch("BEGIN TRANSACTION").unwrap();
                 for (idx, file) in files.iter().enumerate() {
-                    let _ = insert_stmt.execute(params![
-                        idx,
-                        file.transcription,
-                        file.duration,
-                        file.audio.path.clone(),
-                        file.audio.sampling_rate.clone(),
-                        file.audio.bytes.clone(),
-                    ]);
+                    let mut params: Vec<DuckValue> = Vec::with_capacity(5 + metadata_keys.len());
+                    params.push(DuckValue::from(idx));
+                    params.push(DuckValue::from(file.duration));
+                    params.push(DuckValue::from(file.audio.path.clone()));
+                    params.push(DuckValue::from(file.audio.sampling_rate));
+                    params.push(DuckValue::from(file.audio.bytes.clone()));
+
+                    for key in metadata_keys.iter() {
+                        let column_type = metadata_types
+                            .get(key)
+                            .copied()
+                            .unwrap_or(MetadataType::String);
+                        let value = file.metadata.get(key);
+
+                        match column_type {
+                            MetadataType::Bool => {
+                                params.push(DuckValue::from(value.and_then(|v| v.as_bool())));
+                            }
+                            MetadataType::Float64 => {
+                                params.push(DuckValue::from(value.and_then(|v| v.as_f64())));
+                            }
+                            MetadataType::String => {
+                                params.push(DuckValue::from(value.map(|v| match v {
+                                    Value::String(s) => s.clone(),
+                                    _ => v.to_string(),
+                                })));
+                            }
+                        }
+                    }
+
+                    let _ = insert_stmt.execute(params_from_iter(params));
                 }
                 conn.execute_batch("COMMIT TRANSACTION").unwrap();
 
@@ -411,7 +759,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     eprintln!("Failed to close connection: {:?}", e);
                 }
             } else if args.format == Format::Parquet {
-                let _ = write_files_to_parquet(path.clone(), &files, args.parquet_compression);
+                let _ = write_files_to_parquet(
+                    path.clone(),
+                    &files,
+                    metadata_keys.as_ref(),
+                    metadata_types.as_ref(),
+                    args.parquet_compression,
+                );
             }
         });
 
@@ -422,6 +776,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 mod tests {
     use super::*;
     use polars::prelude::{ParquetReader, SerReader};
+    use std::collections::{BTreeSet, HashMap};
     use std::fs::File as StdFile;
     use std::path::Path;
     use tempfile::tempdir;
@@ -455,6 +810,16 @@ mod tests {
         let temp_dir = tempdir()?;
         let output_path = temp_dir.path().join("sample.parquet");
 
+        let mut metadata = HashMap::new();
+        metadata.insert(
+            "transcription".to_string(),
+            Value::String("hello world".to_string()),
+        );
+
+        let mut metadata_types = HashMap::new();
+        metadata_types.insert("transcription".to_string(), MetadataType::String);
+        let metadata_keys = BTreeSet::from(["transcription".to_string()]);
+
         let bytes = vec![0_u8, 1, 2, 3, 4];
         let files = vec![File {
             duration: 1.25,
@@ -463,10 +828,16 @@ mod tests {
                 sampling_rate: 16_000,
                 bytes: bytes.clone(),
             },
-            transcription: "hello world".to_string(),
+            metadata,
         }];
 
-        write_files_to_parquet(&output_path, &files, ParquetCompressionChoice::Snappy)?;
+        write_files_to_parquet(
+            &output_path,
+            &files,
+            &metadata_keys,
+            &metadata_types,
+            ParquetCompressionChoice::Snappy,
+        )?;
 
         let mut file = StdFile::open(&output_path)?;
         let df = ParquetReader::new(&mut file).finish()?;
@@ -503,6 +874,26 @@ mod tests {
             .get(0)
             .map(|b| b.to_vec());
         assert_eq!(bytes_value, Some(bytes));
+
+        Ok(())
+    }
+
+    #[test]
+    fn load_jsonl_metadata_uses_relative_path_matching() -> anyhow::Result<()> {
+        let temp_dir = tempdir()?;
+        let metadata_path = temp_dir.path().join("metadata.jsonl");
+        std::fs::write(
+            &metadata_path,
+            r#"{"relative_path":"clip.wav","transcription":"jsonl text"}"#,
+        )?;
+
+        let store = load_jsonl_metadata(&metadata_path)?;
+        let metadata = store.metadata_for_file("clip.wav", "clip.wav");
+
+        assert_eq!(
+            metadata.get("transcription").and_then(|v| v.as_str()),
+            Some("jsonl text")
+        );
 
         Ok(())
     }

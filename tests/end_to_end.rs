@@ -3,7 +3,7 @@ use std::io::Write;
 use std::path::Path;
 
 use anyhow::Result;
-use assert_cmd::Command;
+use assert_cmd::cargo::cargo_bin_cmd;
 use hound::{SampleFormat, WavSpec, WavWriter};
 use polars::prelude::{ParquetReader, SerReader};
 use tempfile::{NamedTempFile, tempdir};
@@ -22,7 +22,7 @@ fn generates_parquet_dataset_with_metadata() -> Result<()> {
     )?;
     metadata.flush()?;
 
-    Command::cargo_bin("audios-to-dataset")?
+    cargo_bin_cmd!("audios-to-dataset")
         .arg("--input")
         .arg(input_dir.path())
         .arg("--output")
@@ -97,7 +97,7 @@ fn generates_parquet_dataset_with_metadata_fallback_to_filename() -> Result<()> 
     metadata.write_all(b"file_name,transcription\nfallback.wav,using filename\n")?;
     metadata.flush()?;
 
-    Command::cargo_bin("audios-to-dataset")?
+    cargo_bin_cmd!("audios-to-dataset")
         .arg("--input")
         .arg(input_dir.path())
         .arg("--output")
@@ -126,6 +126,64 @@ fn generates_parquet_dataset_with_metadata_fallback_to_filename() -> Result<()> 
 
     let transcription = df.column("transcription")?.str()?.get(0);
     assert_eq!(transcription, Some("using filename"));
+
+    Ok(())
+}
+
+#[test]
+fn generates_parquet_dataset_from_jsonl_metadata_with_typed_fields() -> Result<()> {
+    let input_dir = tempdir()?;
+    let output_dir = tempdir()?;
+
+    let wav_path = input_dir.path().join("jsonl.wav");
+    create_test_wav(&wav_path, 8_000, 8_000)?;
+
+    let metadata_path = input_dir.path().join("metadata.jsonl");
+    let mut metadata = File::create(&metadata_path)?;
+    metadata.write_all(
+        br#"{"relative_path":"jsonl.wav","transcription":"jsonl text","speaker":"alice","verified":true,"snr":12.5}
+"#,
+    )?;
+    metadata.flush()?;
+
+    cargo_bin_cmd!("audios-to-dataset")
+        .arg("--input")
+        .arg(input_dir.path())
+        .arg("--output")
+        .arg(output_dir.path())
+        .arg("--format")
+        .arg("parquet")
+        .arg("--files-per-db")
+        .arg("1")
+        .arg("--num-threads")
+        .arg("1")
+        .arg("--metadata-file")
+        .arg(&metadata_path)
+        .assert()
+        .success();
+
+    let output_file = output_dir.path().join("0.parquet");
+    assert!(
+        output_file.exists(),
+        "expected Parquet file at {:?}",
+        output_file
+    );
+
+    let mut file = File::open(&output_file)?;
+    let df = ParquetReader::new(&mut file).finish()?;
+    assert_eq!(df.height(), 1);
+
+    let transcription = df.column("transcription")?.str()?.get(0);
+    assert_eq!(transcription, Some("jsonl text"));
+
+    let speaker = df.column("speaker")?.str()?.get(0);
+    assert_eq!(speaker, Some("alice"));
+
+    let verified = df.column("verified")?.bool()?.get(0);
+    assert_eq!(verified, Some(true));
+
+    let snr = df.column("snr")?.f64()?.get(0).unwrap();
+    assert!((snr - 12.5).abs() < 1e-6);
 
     Ok(())
 }
