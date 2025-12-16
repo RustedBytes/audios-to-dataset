@@ -121,19 +121,22 @@ fn normalized_relative_path_str(value: &str) -> String {
         .to_string()
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum MetadataType {
     String,
     Bool,
     Float64,
+    List(Box<MetadataType>),
 }
 
 impl MetadataType {
-    fn merge(self, other: MetadataType) -> MetadataType {
-        if self == other {
-            self
-        } else {
-            MetadataType::String
+    fn merge(&self, other: &MetadataType) -> MetadataType {
+        match (self, other) {
+            (MetadataType::List(left), MetadataType::List(right)) => {
+                MetadataType::List(Box::new(left.merge(right)))
+            }
+            _ if self == other => self.clone(),
+            _ => MetadataType::String,
         }
     }
 }
@@ -166,7 +169,7 @@ impl MetadataStore {
             if let Some(value_type) = infer_metadata_type(value) {
                 self.types
                     .entry(key.clone())
-                    .and_modify(|current| *current = current.merge(value_type))
+                    .and_modify(|current| *current = current.merge(&value_type))
                     .or_insert(value_type);
             }
         }
@@ -211,6 +214,25 @@ fn infer_metadata_type(value: &Value) -> Option<MetadataType> {
         Value::Bool(_) => Some(MetadataType::Bool),
         Value::Number(_) => Some(MetadataType::Float64),
         Value::String(_) => Some(MetadataType::String),
+        Value::Array(values) => {
+            let mut inner_type: Option<MetadataType> = None;
+
+            for value in values {
+                let Some(value_type) = infer_metadata_type(value) else {
+                    continue;
+                };
+
+                inner_type = Some(
+                    inner_type
+                        .map(|current| current.merge(&value_type))
+                        .unwrap_or(value_type),
+                );
+            }
+
+            let inner_type = inner_type.unwrap_or(MetadataType::String);
+
+            Some(MetadataType::List(Box::new(inner_type)))
+        }
         Value::Null => None,
         _ => Some(MetadataType::String),
     }
@@ -222,6 +244,18 @@ fn sanitize_column_name(name: &str) -> String {
 
 fn is_reserved_metadata_key(key: &str) -> bool {
     matches!(key, "duration" | "audio" | "id")
+}
+
+fn metadata_feature_value(metadata_type: &MetadataType) -> serde_json::Value {
+    match metadata_type {
+        MetadataType::Bool => serde_json::json!({"dtype": "bool", "_type": "Value"}),
+        MetadataType::Float64 => serde_json::json!({"dtype": "float64", "_type": "Value"}),
+        MetadataType::String => serde_json::json!({"dtype": "string", "_type": "Value"}),
+        MetadataType::List(inner) => serde_json::json!({
+            "_type": "Sequence",
+            "feature": metadata_feature_value(inner)
+        }),
+    }
 }
 
 enum MetadataFormat {
@@ -364,12 +398,12 @@ fn build_create_table_sql(
     for key in metadata_keys {
         let column_type = metadata_types
             .get(key)
-            .copied()
+            .cloned()
             .unwrap_or(MetadataType::String);
         let sql_type = match column_type {
             MetadataType::Bool => "BOOLEAN",
             MetadataType::Float64 => "DOUBLE",
-            MetadataType::String => "VARCHAR",
+            MetadataType::String | MetadataType::List(_) => "VARCHAR",
         };
 
         columns.push(format!("\"{}\" {}", sanitize_column_name(key), sql_type));
@@ -444,7 +478,7 @@ fn write_files_to_parquet<P: AsRef<Path>>(
     for key in metadata_keys {
         let column_type = metadata_types
             .get(key)
-            .copied()
+            .cloned()
             .unwrap_or(MetadataType::String);
 
         match column_type {
@@ -474,6 +508,61 @@ fn write_files_to_parquet<P: AsRef<Path>>(
                     .collect();
                 columns.push(Series::new(key.as_str().into(), data).into_column());
             }
+            MetadataType::List(inner) => match *inner {
+                MetadataType::Bool => {
+                    let data: Vec<AnyValue> = files
+                        .iter()
+                        .map(|file| match file.metadata.get(key) {
+                            Some(Value::Array(values)) => {
+                                let inner: Vec<Option<bool>> =
+                                    values.iter().map(|val| val.as_bool()).collect();
+                                AnyValue::List(Series::new("".into(), inner))
+                            }
+                            _ => AnyValue::Null,
+                        })
+                        .collect();
+
+                    columns.push(Series::new(key.as_str().into(), data.as_slice()).into_column());
+                }
+                MetadataType::Float64 => {
+                    let data: Vec<AnyValue> = files
+                        .iter()
+                        .map(|file| match file.metadata.get(key) {
+                            Some(Value::Array(values)) => {
+                                let inner: Vec<Option<f64>> =
+                                    values.iter().map(|val| val.as_f64()).collect();
+                                AnyValue::List(Series::new("".into(), inner))
+                            }
+                            _ => AnyValue::Null,
+                        })
+                        .collect();
+
+                    columns.push(Series::new(key.as_str().into(), data.as_slice()).into_column());
+                }
+                _ => {
+                    let data: Vec<AnyValue> = files
+                        .iter()
+                        .map(|file| match file.metadata.get(key) {
+                            Some(Value::Array(values)) => {
+                                let inner: Vec<Option<String>> = values
+                                    .iter()
+                                    .map(|val| match val {
+                                        Value::String(s) => Some(s.clone()),
+                                        Value::Bool(b) => Some(b.to_string()),
+                                        Value::Number(n) => Some(n.to_string()),
+                                        Value::Null => None,
+                                        other => Some(other.to_string()),
+                                    })
+                                    .collect();
+                                AnyValue::List(Series::new("".into(), inner))
+                            }
+                            _ => AnyValue::Null,
+                        })
+                        .collect();
+
+                    columns.push(Series::new(key.as_str().into(), data.as_slice()).into_column());
+                }
+            },
         }
     }
 
@@ -498,20 +587,12 @@ fn write_files_to_parquet<P: AsRef<Path>>(
     );
 
     for key in metadata_keys {
-        let dtype = match metadata_types
+        let dtype = metadata_types
             .get(key)
-            .copied()
-            .unwrap_or(MetadataType::String)
-        {
-            MetadataType::Bool => "bool",
-            MetadataType::Float64 => "float64",
-            MetadataType::String => "string",
-        };
+            .cloned()
+            .unwrap_or(MetadataType::String);
 
-        features.insert(
-            key.clone(),
-            serde_json::json!({"dtype": dtype, "_type": "Value"}),
-        );
+        features.insert(key.clone(), metadata_feature_value(&dtype));
     }
 
     let hf_value = serde_json::json!({"info": {"features": features}});
@@ -594,20 +675,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         if let Some(target_relative) = &metadata_relative
-            && let Ok(entry_relative) = entry.strip_prefix(&args.input) {
-                let normalized_entry = normalized_relative_path(entry_relative);
-                if &normalized_entry == target_relative {
-                    println!("Skipping metadata file: {:?}", entry);
-                    continue;
-                }
+            && let Ok(entry_relative) = entry.strip_prefix(&args.input)
+        {
+            let normalized_entry = normalized_relative_path(entry_relative);
+            if &normalized_entry == target_relative {
+                println!("Skipping metadata file: {:?}", entry);
+                continue;
             }
+        }
 
         if let Some(target_abs) = &metadata_absolute
             && let Ok(entry_abs) = entry.canonicalize()
-                && &entry_abs == target_abs {
-                    println!("Skipping metadata file: {:?}", entry);
-                    continue;
-                }
+            && &entry_abs == target_abs
+        {
+            println!("Skipping metadata file: {:?}", entry);
+            continue;
+        }
 
         if args.check_mime_type {
             let mime_type = tree_magic_mini::from_filepath(&entry);
@@ -732,7 +815,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     for key in metadata_keys.iter() {
                         let column_type = metadata_types
                             .get(key)
-                            .copied()
+                            .cloned()
                             .unwrap_or(MetadataType::String);
                         let value = file.metadata.get(key);
 
@@ -748,6 +831,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     Value::String(s) => s.clone(),
                                     _ => v.to_string(),
                                 })));
+                            }
+                            MetadataType::List(_) => {
+                                params.push(DuckValue::from(value.map(|v| v.to_string())));
                             }
                         }
                     }
