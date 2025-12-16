@@ -195,6 +195,7 @@ impl MetadataStore {
             .get(relative_path)
             .cloned()
             .or_else(|| self.by_name.get(file_name).cloned())
+            .or_else(|| self.by_name.get(relative_path).cloned())
             .unwrap_or_default();
 
         metadata

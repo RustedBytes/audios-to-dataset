@@ -188,6 +188,67 @@ fn generates_parquet_dataset_from_jsonl_metadata_with_typed_fields() -> Result<(
     Ok(())
 }
 
+#[test]
+fn uses_jsonl_filename_with_path_for_metadata_lookup() -> Result<()> {
+    let input_dir = tempdir()?;
+    let output_dir = tempdir()?;
+
+    let nested = input_dir.path().join("nested");
+    std::fs::create_dir_all(&nested)?;
+
+    let wav_path = nested.join("with_path.wav");
+    create_test_wav(&wav_path, 44_100, 44_100)?;
+
+    let metadata_path = input_dir.path().join("metadata.jsonl");
+    let mut metadata = File::create(&metadata_path)?;
+    metadata.write_all(
+        br#"{"file_name":"nested/with_path.wav","transcription":"path lookup","speaker":"bob","verified":true,"snr":5.5}
+"#,
+    )?;
+    metadata.flush()?;
+
+    cargo_bin_cmd!("audios-to-dataset")
+        .arg("--input")
+        .arg(input_dir.path())
+        .arg("--output")
+        .arg(output_dir.path())
+        .arg("--format")
+        .arg("parquet")
+        .arg("--files-per-db")
+        .arg("1")
+        .arg("--num-threads")
+        .arg("1")
+        .arg("--metadata-file")
+        .arg(&metadata_path)
+        .assert()
+        .success();
+
+    let output_file = output_dir.path().join("0.parquet");
+    assert!(
+        output_file.exists(),
+        "expected Parquet file at {:?}",
+        output_file
+    );
+
+    let mut file = File::open(&output_file)?;
+    let df = ParquetReader::new(&mut file).finish()?;
+    assert_eq!(df.height(), 1);
+
+    let transcription = df.column("transcription")?.str()?.get(0);
+    assert_eq!(transcription, Some("path lookup"));
+
+    let speaker = df.column("speaker")?.str()?.get(0);
+    assert_eq!(speaker, Some("bob"));
+
+    let verified = df.column("verified")?.bool()?.get(0);
+    assert_eq!(verified, Some(true));
+
+    let snr = df.column("snr")?.f64()?.get(0).unwrap();
+    assert!((snr - 5.5).abs() < 1e-6);
+
+    Ok(())
+}
+
 fn create_test_wav(path: &Path, sample_rate: u32, samples: usize) -> Result<()> {
     let spec = WavSpec {
         channels: 1,
