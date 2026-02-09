@@ -566,15 +566,15 @@ fn write_files_to_parquet<P: AsRef<Path>>(
         }
     }
 
-    let mut df = DataFrame::new(columns)?;
+    let mut df = DataFrame::new(files.len(), columns)?;
 
     let pq_compression = match compression {
         ParquetCompressionChoice::Uncompressed => ParquetCompression::Uncompressed,
         ParquetCompressionChoice::Snappy => ParquetCompression::Snappy,
         ParquetCompressionChoice::Gzip => ParquetCompression::Gzip(None),
-        ParquetCompressionChoice::Lzo => ParquetCompression::Lzo,
+        ParquetCompressionChoice::Lzo => ParquetCompression::Snappy,
         ParquetCompressionChoice::Brotli => ParquetCompression::Brotli(None),
-        ParquetCompressionChoice::Lz4 => ParquetCompression::Lzo,
+        ParquetCompressionChoice::Lz4 => ParquetCompression::Lz4Raw,
         ParquetCompressionChoice::Zstd => ParquetCompression::Zstd(None),
         ParquetCompressionChoice::Lz4Raw => ParquetCompression::Lz4Raw,
     };
