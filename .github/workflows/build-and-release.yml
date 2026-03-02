@@ -18,7 +18,7 @@ jobs:
       - name: Build release
         run: cargo build --release
       - name: Upload release binary as artifact
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: audios-to-dataset
           path: target/release/audios-to-dataset
