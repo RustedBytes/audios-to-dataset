@@ -23,7 +23,7 @@ csv = "1.4.0"
 
 [dev-dependencies]
 assert_cmd = "2.1.2"
-tempfile = "3.26"
+tempfile = "3.27"
 
 [profile.release]
 opt-level = 3
